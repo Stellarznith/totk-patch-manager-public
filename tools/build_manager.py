@@ -68,6 +68,11 @@ def main() -> None:
             hashes[digest] = expected.stem.removeprefix("expected-v")
     core = core.replace(marker, "_MOD_CENTER_SOURCE = " + repr(mods), 1)
     core = core.replace("_MOD_GAME_HASHES = {}", "_MOD_GAME_HASHES = " + repr(hashes), 1)
+    marker = "_PS5_ACTION_SOURCE = None"
+    if core.count(marker) != 1:
+        raise ValueError("PS5 action-prompt bundle marker is missing or duplicated")
+    prompt = (MANAGER / "manager_ps5_prompt.py").read_text(encoding="utf-8")
+    core = core.replace(marker, "_PS5_ACTION_SOURCE = " + repr(prompt), 1)
     (output / "core.py").write_text(core, encoding="utf-8", newline="\n")
 
     runtime = output / "python"
@@ -94,7 +99,7 @@ def main() -> None:
     )
     subprocess.run(
         [str(runtime / "python.exe"), "-X", "utf8", "-c",
-         "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; print('backend imports OK')"],
+         "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; assert core.ps5_action_backend().repair; print('backend imports OK')"],
         cwd=output, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     print(output / EXE)

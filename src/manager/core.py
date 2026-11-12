@@ -31,11 +31,30 @@ NETWORK = 'auto'
 MIRROR = 'https://gh-proxy.com/'
 _MOD_CENTER_SOURCE = None
 _MOD_GAME_HASHES = {}
+_PS5_ACTION_SOURCE = None
 # The game reads one overlay folder, so the installed pack always lands in ICON_FOLDER; the two icon mods
 # only replace the six files that carry the artwork, and the shared rest comes from the built-in white set.
 ICON_FOLDER = 'romfs-patches-ps5'
 ICON_STYLES = ('white', 'stavaas', 'alerion')
 ICON_LABELS = {'white': 'Stellarznith', 'stavaas': 'Stavaas', 'alerion': 'Alerion'}
+PS5_ACTION_COMMON = 'UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs'
+PS5_ACTION_REVISION = 1
+
+
+def ps5_action_backend():
+    if _PS5_ACTION_SOURCE is None:
+        import manager_ps5_prompt
+        return manager_ps5_prompt
+    # Keep the fixed file list understood by installed manager updaters.
+    from types import ModuleType
+    module = ModuleType('manager_ps5_prompt')
+    exec(compile(_PS5_ACTION_SOURCE, 'manager_ps5_prompt.py', 'exec'), vars(module))
+    return module
+
+
+def ps5_action_outdated(state):
+    return (state.get('ps5') and ICON_FOLDER + '/' + PS5_ACTION_COMMON in state.get('files', {})
+            and state.get('ps5_action_revision', 0) < PS5_ACTION_REVISION)
 
 
 def icon_style(value):
@@ -416,7 +435,7 @@ def health(ctx):
     status='旧独立版本（未直接安装）' if state.get('mode')!='direct' else '需要修复' if missing else '正常'
     return dict(status=status, mode=state.get('mode','legacy'),version=state['version'], missing=missing,
                 files=len(state['files']), ps5=state['ps5'], graphics=state['graphics'],
-                recipe_outdated=bool(state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) and (state.get('recipe_id')!=recipe_id(state['version'] if state.get('install_method')=='source' else None) or state.get('prebuilt_id') and (APP/'prebuilt/manifest.json').is_file() and state['prebuilt_id']!=digest(APP/'prebuilt/manifest.json'))))
+                recipe_outdated=bool(state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) and (ps5_action_outdated(state) or state.get('recipe_id')!=recipe_id(state['version'] if state.get('install_method')=='source' else None) or state.get('prebuilt_id') and (APP/'prebuilt/manifest.json').is_file() and state['prebuilt_id']!=digest(APP/'prebuilt/manifest.json'))))
 
 
 def icons_health(ctx):
@@ -424,7 +443,11 @@ def icons_health(ctx):
     metadata = read_json(folder / '.totk-manager.json', {})
     if not metadata:
         return '未安装'
-    return '正常' if all(inside(folder, p).is_file() and digest(inside(folder, p)) == sha for p, sha in metadata['files'].items()) else '需要修复'
+    if any(not inside(folder, p).is_file() or digest(inside(folder, p)) != sha for p, sha in metadata['files'].items()):
+        return '需要修复'
+    if 'romfs/' + PS5_ACTION_COMMON in metadata['files'] and metadata.get('ps5_action_revision', 0) < PS5_ACTION_REVISION:
+        return '有图标修复更新'
+    return '正常'
 
 
 def icons_style(ctx):
@@ -443,7 +466,7 @@ def install_icons(ctx, style=None):
     # A standalone mod is a plain RomFS tree, so it carries one style only. F1 → 操作 → 按键提示 reads the three folders
     # next to romfs-index.bin instead, so they are written as well: picking a style there then takes effect on the next
     # start without coming back to this tool.
-    assets(ctx, staged, True, False, None)
+    prompt_revision = assets(ctx, staged, True, False, None) or 0
     written = []
     features = binary_features(Path(ctx['game']))
     if features is not None and features & 1:
@@ -464,7 +487,7 @@ def install_icons(ctx, style=None):
     # The manifest describes the pack; it is not an added guest RomFS file.
     shutil.move(str(pack / 'romfs/manifest.tsv'), pack / 'manifest.tsv')
     files = {p.relative_to(pack).as_posix(): digest(p) for p in pack.rglob('*') if p.is_file()}
-    write_json(pack / '.totk-manager.json', dict(files=files, style=style,
+    write_json(pack / '.totk-manager.json', dict(files=files, style=style, ps5_action_revision=prompt_revision,
                                                  resource_format='guest RomFS; independent of host build version'))
     dest = Path(ctx['game']).parent / 'mods/PS5_Icons_Manager'
     if dest.exists():
@@ -621,6 +644,8 @@ def prepared_key(ctx,info,cpu,ps5,graphics,official):
                   ps5=ps5,graphics=graphics,official=official,
                   recipe=recipe_id(info['tag_name'].removeprefix('v')) if not official else 'official',
                   assets=assets_id() if not official else '')
+    if ps5 and not official:
+        identity['ps5_action_revision'] = PS5_ACTION_REVISION
     return hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
 
 
@@ -645,7 +670,7 @@ def install_prepared(ctx,package,original_hash):
     removals=[];metadata=package['metadata']
     previous=active(ctx)
     if not package.get('cleanup') and previous.get('mode')=='direct' and set(previous.get('files',{}))==tracked and all(previous.get(k)==metadata.get(k) for k in ('version','ps5','graphics','official')) and health(ctx)['status']=='正常' and all((root/name).is_file() and digest(root/name)==package['files']['totk.exe' if name==Path(ctx['game']).name else name] for name in tracked):
-        if previous.get('recipe_id')!=metadata.get('recipe_id'):
+        if any(previous.get(k)!=metadata.get(k) for k in ('recipe_id','prebuilt_id','ps5_action_revision')):
             previous.update(metadata);write_json(home(ctx)/'active.json',previous)
         emit('所选组件已安装，程序与资源校验正常，无需重复安装。',result=dict(state=previous,health=health(ctx)))
         return previous
@@ -725,7 +750,7 @@ def install_prebuilt(ctx,ps5,graphics,cache,repair=False):
     identity=digest(APP/'prebuilt/manifest.json');current=active(ctx)
     if repair and current.get('install_method')=='source' and current.get('version')!=manifest['version']:
         raise ValueError('当前是手动构建的其它上游版本；请自行选择“按当前版本重编译”，本次未降级。')
-    if current.get('prebuilt_id')==identity and current.get('ps5')==ps5 and current.get('graphics')==graphics and health(ctx)['status']=='正常':
+    if current.get('prebuilt_id')==identity and current.get('ps5')==ps5 and current.get('graphics')==graphics and not ps5_action_outdated(current) and health(ctx)['status']=='正常':
         emit('所选内置组件已安装，文件校验正常；无需重复安装。',result=dict(state=current,health=health(ctx)));return current
     emit('安装随包 '+manifest['version']+' 成品，CPU '+tier+'；不联网、不编译、不全量预热着色器。')
     stage=cache/'prebuilt-staging'/str(time.time_ns());stage.mkdir(parents=True)
@@ -744,7 +769,7 @@ def install_prebuilt(ctx,ps5,graphics,cache,repair=False):
         if digest(stage/'totk.exe')!=selected['files']['totk.exe']:raise ValueError('组件差分还原校验失败。')
     else:extract_prebuilt(selected,stage)
     if binary_features(stage/'totk.exe')!=flags:raise ValueError('程序组件标识与选择不一致，未安装。')
-    assets(ctx,stage,ps5,graphics,version=bundled)
+    prompt_revision = assets(ctx,stage,ps5,graphics,version=bundled) or 0
     files={p.relative_to(stage).as_posix():digest(p) for p in stage.rglob('*') if p.is_file()}
     # Reuse the player's own index for loader probes. Standard RomFS images need no external index.
     index=Path(ctx['game']).parent/'romfs-index.bin'
@@ -762,6 +787,8 @@ def install_prebuilt(ctx,ps5,graphics,cache,repair=False):
     for mode in ('--probe-cfg','--probe-loader'):
         run([stage/'totk.exe',mode,'--exefs',ctx['exefs'],'--romfs',ctx['romfs'],'--profile',stage/'probe-profile'],stage,environment)
     metadata=dict(version=manifest['version'],source_commit=manifest['source_commit'],ps5=ps5,graphics=graphics,official=False,game_version=game_version,recipe_id=manifest['recipe_id'],prebuilt_id=identity,install_method='prebuilt',cpu=tier)
+    if prompt_revision:
+        metadata['ps5_action_revision'] = prompt_revision
     if 'romfs-index.bin' in files:metadata['local_index_regenerated']=True
     package=dict(path=stage,files=files,tracked=list(files),metadata=metadata)
     return install_prepared(ctx,package,original_hash)
@@ -891,9 +918,17 @@ def assets(ctx, output, ps5, graphics, style=None, *, version=None):
             p = inside(output, folder + logical); p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(data)
 
 
+    folders = list(prefixes if style is None else (chosen,))
     if shaped_items:
         with zipfile.ZipFile(APP / 'assets.zip') as z:
             install_shaped_ps5(output, groups, z, shaped_items)
+        folders.extend(sorted({item['path'].partition('/')[0] for item in shaped_items}))
+    folders = [folder.rstrip('/') for folder in folders]
+    if any((output / folder / PS5_ACTION_COMMON).is_file() for folder in folders):
+        emit('正在用本地 1.4.3 资源校准 PS5 交互按键。')
+        with (Path(ctx['romfs']) / 'romfs.bin').open('rb') as blob:
+            return ps5_action_backend().repair(output, folders, rows, blob, ICON_FOLDER, cancelled)
+    return 0
 
 
 def install_shaped_ps5(output, groups, archive, items):
@@ -1187,7 +1222,7 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
             shutil.copy2(p, deployment / p.name)
     for p in (kit / 'bin').glob('*.dll'):
         shutil.copy2(p, deployment / p.name)
-    if not official:assets(ctx, deployment, ps5, graphics, version=tag)
+    prompt_revision = (assets(ctx, deployment, ps5, graphics, version=tag) or 0) if not official else 0
     original_index = Path(ctx['game']).parent / 'romfs-index.bin'
     if official:shutil.copy2(output/'romfs-index.bin',deployment/'romfs-index.bin')
     elif original_index.is_file():shutil.copy2(original_index, deployment / original_index.name)
@@ -1270,6 +1305,8 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
     for p in (deployment/'shader-cache').rglob('*'):
         if p.is_file():files[p.relative_to(deployment).as_posix()]=p
     metadata=dict(version=tag,source_commit=source_id,ps5=ps5,graphics=graphics,official=official,game_version=game_version,recipe_id=recipe_id(tag) if not official else '',install_method='source')
+    if prompt_revision:
+        metadata['ps5_action_revision'] = prompt_revision
     if official:metadata['local_index_regenerated']=True
     package=dict(deployment=deployment.relative_to(cache).as_posix(),files={name:digest(p) for name,p in files.items()},tracked=tracked,metadata=metadata)
     write_json(cache/'prepared'/(ready_key+'.json'),package)

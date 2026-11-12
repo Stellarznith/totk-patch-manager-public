@@ -361,7 +361,7 @@ class ManagerTests(unittest.TestCase):
         def hostcheck(args,**kwargs):
             self.assertEqual(Path(args[0]),checker)
             return mock.Mock(returncode=0,stdout=json.dumps(dict(x86_64_v2=True,x86_64_v3=True)))
-        with mock.patch.object(m,'APP',app),mock.patch.object(m,'recipe_id',return_value='test recipe'),mock.patch.object(m,'assets'),mock.patch.object(m,'run') as probes,mock.patch.object(m.subprocess,'run',side_effect=hostcheck),mock.patch.object(m,'toolkit',side_effect=AssertionError('unexpected toolkit')),mock.patch.object(m,'download',side_effect=AssertionError('unexpected download')):
+        with mock.patch.object(m,'APP',app),mock.patch.object(m,'recipe_id',return_value='test recipe'),mock.patch.object(m,'assets',return_value=0),mock.patch.object(m,'run') as probes,mock.patch.object(m.subprocess,'run',side_effect=hostcheck),mock.patch.object(m,'toolkit',side_effect=AssertionError('unexpected toolkit')),mock.patch.object(m,'download',side_effect=AssertionError('unexpected download')):
             m.main(dict(action='apply',game=str(game),cache=str(self.root/'cache'),ps5=True,graphics=True))
             self.assertEqual([call.args[0][1] for call in probes.call_args_list],['--probe-cfg','--probe-loader'])
         self.assertEqual(game.read_bytes(),exe);self.assertEqual((root/'totk.ini').read_bytes(),ini)
@@ -628,6 +628,12 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(m.icons_health(ctx),'正常');self.assertEqual(game.read_bytes(),before)
         pack=game.parent/'mods/PS5_Icons_Manager';self.assertTrue((pack/'romfs').is_dir())
         self.assertFalse((pack/'romfs/manifest.tsv').exists())
+        metadata=json.loads((pack/'.totk-manager.json').read_text(encoding='utf-8'))
+        if (pack/'romfs'/m.PS5_ACTION_COMMON).is_file():
+            self.assertEqual(metadata['ps5_action_revision'], m.PS5_ACTION_REVISION)
+            self.assertFalse(m.ps5_action_outdated(dict(ps5=True, files={m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON:''},
+                                                        ps5_action_revision=metadata['ps5_action_revision'])))
+            self.assertTrue(m.ps5_action_outdated(dict(ps5=True, files={m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON:''})))
 
 
 if __name__ == '__main__':
