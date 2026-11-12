@@ -1,6 +1,7 @@
 """Build the WinForms manager in a new directory using locally supplied tools."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -53,8 +54,21 @@ def main() -> None:
 
     output.mkdir(parents=True)
     print(f"recipe_id={make_recipe(args.upstream, output / 'recipe.zip')}", flush=True)
-    for name in ("core.py", "manager_install.py", "manager_update.py", "manager-version.txt", EXE + ".config"):
+    for name in ("manager_install.py", "manager_update.py", "manager-version.txt", EXE + ".config"):
         shutil.copyfile(MANAGER / name, output / name)
+    core = (MANAGER / "core.py").read_text(encoding="utf-8")
+    marker = "_MOD_CENTER_SOURCE = None"
+    if core.count(marker) != 1:
+        raise ValueError("Manager module bundle marker is missing or duplicated")
+    mods = (MANAGER / "manager_mods.py").read_text(encoding="utf-8")
+    hashes = {}
+    for expected in sorted((args.upstream / "tools/data").glob("expected-v*.json")):
+        digest = json.loads(expected.read_text(encoding="utf-8"))["exefs_sha256"].get("main")
+        if digest:
+            hashes[digest] = expected.stem.removeprefix("expected-v")
+    core = core.replace(marker, "_MOD_CENTER_SOURCE = " + repr(mods), 1)
+    core = core.replace("_MOD_GAME_HASHES = {}", "_MOD_GAME_HASHES = " + repr(hashes), 1)
+    (output / "core.py").write_text(core, encoding="utf-8", newline="\n")
 
     runtime = output / "python"
     shutil.copytree(python_kit, runtime)
@@ -80,7 +94,7 @@ def main() -> None:
     )
     subprocess.run(
         [str(runtime / "python.exe"), "-X", "utf8", "-c",
-         "from compression import zstd; import manager_install; import core; print('backend imports OK')"],
+         "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; print('backend imports OK')"],
         cwd=output, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     print(output / EXE)

@@ -29,6 +29,8 @@ CANCEL = None
 LOG = None
 NETWORK = 'auto'
 MIRROR = 'https://gh-proxy.com/'
+_MOD_CENTER_SOURCE = None
+_MOD_GAME_HASHES = {}
 # The game reads one overlay folder, so the installed pack always lands in ICON_FOLDER; the two icon mods
 # only replace the six files that carry the artwork, and the shared rest comes from the built-in white set.
 ICON_FOLDER = 'romfs-patches-ps5'
@@ -946,10 +948,12 @@ def launch_env(ctx):
     return env
 
 
-def ensure_idle(ctx):
+def ensure_idle(ctx, strict=False):
     # Conservatively protect saves while any TotK game is running; never terminate a player's process.
     for name in set(['totk.exe',Path(ctx['game']).name]):
         r = subprocess.run(['tasklist.exe', '/FI', 'IMAGENAME eq '+name, '/FO', 'CSV', '/NH'], capture_output=True, creationflags=FLAGS)
+        if strict and (r.returncode or not r.stdout.strip()):
+            raise ValueError('无法确认游戏是否已退出，MOD 操作已暂停。')
         if r.stdout.lstrip().startswith(b'"'):
             raise ValueError('请先正常保存并退出游戏，再进行更新、修复或回退。')
 
@@ -1280,6 +1284,10 @@ def launch(ctx, official=False, safe=False, sdr=False):
     if state.get('mode')=='direct' and health(ctx)['status'] != '正常':
         raise ValueError('已安装程序或补丁文件损坏，请先检查／修复。')
     env = launch_env(ctx)
+    env.pop('TOTK_MODS_DIR')
+    for key in ('TOTK_MODS_DIR', 'TOTK_MODS_ORDER', 'TOTK_MODS_DISABLED'):
+        if key in os.environ:
+            env[key] = os.environ[key]
     if safe:
         env.update(TOTK_DLAA='0',TOTK_FRAMEGEN='off',TOTK_TEMPORAL_ENGINE='dlss',TOTK_VK_RECORDER='0',TOTK_PIPE_PREBUILD='0')
     if sdr:env['TOTK_HDR']='0'
@@ -1287,9 +1295,12 @@ def launch(ctx, official=False, safe=False, sdr=False):
         env['TOTK_XLATE'] = str(exe.parent / 'totk_xlate.exe')
         env['TOTK_XLATE_ID'] = str(exe.parent / 'totk_xlate.id')
         if state.get('ps5'):
-            values = ini_values(exe.parent / 'totk.ini')
-            disabled = values.get('MODS_DISABLED','').split('|')
-            env['TOTK_MODS_DISABLED'] = '|'.join(x for x in disabled if x) + ('|' if any(disabled) else '') + 'PS5_Icons_Manager'
+            try:
+                _, values = mod_backend().read_ini(exe.parent / 'totk.ini')
+            except (ValueError, OSError):
+                values = {'mods_disabled': ini_values(exe.parent / 'totk.ini').get('MODS_DISABLED', '')}
+            disabled = env.get('TOTK_MODS_DISABLED', values.get('mods_disabled', '')).split('|')
+            env['TOTK_MODS_DISABLED'] = '|'.join(dict.fromkeys([x for x in disabled if x] + ['PS5_Icons_Manager']))
     log = home(ctx) / 'logs' / ('game-safe.log' if safe else 'game-sdr.log' if sdr else 'game.log')
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open('wb') as f:
@@ -1317,13 +1328,45 @@ def launch(ctx, official=False, safe=False, sdr=False):
                          '可用安全启动对照超分与帧生成，或用 SDR 排查对照 HDR。')
 
 
+def mod_backend():
+    if _MOD_CENTER_SOURCE is None:
+        import manager_mods
+        return manager_mods
+    # The existing updater accepts six fixed paths. Ship this module with core.py.
+    from types import ModuleType
+    module = ModuleType('manager_mods')
+    module.__file__ = __file__
+    exec(compile(_MOD_CENTER_SOURCE, 'manager_mods.py', 'exec'), vars(module))
+    return module
+
+
+def mod_game_version(ctx):
+    games = read_json(APP/'prebuilt/manifest.json', {}).get('games', {})
+    for version, game in games.items():
+        expected = game.get('exefs', {})
+        if expected and all((Path(ctx['exefs']) / name).is_file()
+                            and digest(Path(ctx['exefs']) / name) == checksum for name, checksum in expected.items()):
+            return version
+    main = Path(ctx['exefs']) / 'main'
+    if main.is_file():
+        return _MOD_GAME_HASHES.get(digest(main), '')
+    return ''
+
+
 def main(request):
     # Independent manager copies must not concurrently activate or repair the same game.
     mutating={'apply','update','repair','rebuild-current','prewarm-shaders','rollback','disable','icons','icons-disable','backup','launch','launch-safe','launch-sdr','official','restore-official','language','reset-render-cache','cleanup-owned'}
-    if request['action'] not in mutating:
+    action = request['action']
+    mods_write = action.startswith('mods-') and action not in {
+        'mods-scan', 'mods-preview', 'mods-profile-preview', 'mods-profile-export'}
+    if action not in mutating and not mods_write:
         return dispatch(request)
     import msvcrt
-    ctx=context(request['game']); path=home(ctx)/'operation.lock'; path.parent.mkdir(parents=True,exist_ok=True)
+    ctx=context(request['game']); path=home(ctx)/'operation.lock'
+    if mods_write:
+        mod_backend().safe_path(path)
+        ensure_idle(ctx, strict=True)
+    path.parent.mkdir(parents=True,exist_ok=True)
     with path.open('a+b') as lock:
         try:
             if lock.seek(0,2)==0:lock.write(b'0');lock.flush()
@@ -1333,6 +1376,8 @@ def main(request):
             raise ValueError('另一个管理器正在处理这个游戏，请等待它完成。') from e
         try:
             if (home(ctx)/'pending.json').is_file():
+                if mods_write:
+                    raise ValueError('有未完成的游戏补丁安装，请先在安装管理中恢复。')
                 ensure_idle(ctx);manager_install.recover(Path(ctx['game']).parent,home(ctx),emit)
             return dispatch(request)
         finally:
@@ -1367,6 +1412,10 @@ def dispatch(request):
             emit('GitHub 管理器发行版：'+info['version'],result=info)
         return
     ctx = context(request['game'])
+    if action.startswith('mods-'):
+        result = mod_backend().Center(ctx, lambda target: ensure_idle(target, strict=True), cancelled, mod_game_version).dispatch(request)
+        emit('MOD 操作完成。资源变化在下次启动游戏时生效。', result=result)
+        return
     if action == 'inspect':
         bundled=read_json(APP/'prebuilt/manifest.json',{}).get('version','')
         compatibility=dict(status=prebuilt_version_status(ctx['version'],bundled),bundled=bundled)

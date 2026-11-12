@@ -15,7 +15,7 @@ using System.Windows.Forms;
 public partial class Manager : Form {
     static bool selftest;
     readonly string app = AppDomain.CurrentDomain.BaseDirectory;
-    readonly JavaScriptSerializer json = new JavaScriptSerializer();
+    readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
     readonly TextBox path = new TextBox(), log = new TextBox();
     readonly Label current = new Label(), newest = new Label(), components = new Label(), gpu = new Label();
     readonly Label ps5State = new Label(), graphicsState = new Label();
@@ -209,6 +209,7 @@ public partial class Manager : Form {
         language.SelectedIndex = Math.Max(0, Array.IndexOf(languages, Value(r, "language")));
         Append("当前游戏：" + Value(ctx, "game"));
         FitCurrentPage();
+        if (activePage == 6) await RefreshMods();
     }
     async Task Check(bool manual) {
         var r=await Execute("check");if(r==null)return;latest=Value(r,"version");newest.Text="最新正式版 · "+latest;

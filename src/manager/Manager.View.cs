@@ -124,8 +124,8 @@ public partial class Manager {
         brand.ForeColor = Theme.Text;
         brand.Text = "王国之泪\n补丁管理器";
         rail.Controls.Add(brand);
-        string[] captions = { "首页", "PS5 手柄", "图形增强", "安装管理", "备份与诊断", "设置" };
-        Symbol[] glyphs = { Symbol.Home, Symbol.Controller, Symbol.Display, Symbol.Package, Symbol.Shield, Symbol.Settings };
+        string[] captions = { "首页", "PS5 手柄", "图形增强", "安装管理", "备份与诊断", "设置", "MOD 管理" };
+        Symbol[] glyphs = { Symbol.Home, Symbol.Controller, Symbol.Display, Symbol.Package, Symbol.Shield, Symbol.Settings, Symbol.Package };
         for (int i = 0; i < captions.Length; i++) {
             int page = i;
             var nav = MakeButton(captions[i], glyphs[i], ButtonTone.Navigation, (s, e) => ShowPage(page));
@@ -288,6 +288,7 @@ public partial class Manager {
         settings.Controls.Add(preferences);
         Card(settings, "下载线路", "管理器更新包和上游资源共用此线路。管理器版本和校验值由 GitHub 提供。",
             network, automatic);
+        BuildModCenter();
     }
 
     PageColumn Page(string heading, string description) {
@@ -324,6 +325,8 @@ public partial class Manager {
         }
         pages[index].BringToFront();
         FitCurrentPage();
+        if (!selftest && index == 6 && selected != "" && !busy)
+            BeginInvoke(new Action(async () => await RefreshMods()));
     }
     void FitCurrentPage() {
         var viewport = (Panel)pages[activePage];

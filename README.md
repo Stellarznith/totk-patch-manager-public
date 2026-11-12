@@ -10,13 +10,14 @@
 - **Graphics** provides NVIDIA DLSS/DLAA and model controls, including manual model M, upstream FSR 1 spatial scaling, and a separate NVIDIA DLSS or AMD FSR frame generation setting. Availability depends on the runtime, GPU, driver and locally supplied libraries.
 - **Installation and maintenance** includes version detection, offline installation from a matching local package, repair, backup and rollback, safe launch, shader prewarming and HDR/SDR diagnostics.
 - **Manager updates** offers stable and preview channels, release notes, verified downloads, GH-Proxy acceleration with direct GitHub fallback, and rollback if the new manager fails to start.
+- **Mod Center** imports ZIPs and folders, manages the same switches and priority as F1, and offers conflict diagnostics, profiles and undo. [Mod Center guide](docs/mod-manager.md)
 
 ![TotK Patch Manager Windows GUI showing the DualSense and standalone icon controls](docs/images/manager-controller.png)
 
 ## Downloads and installation
 
 1. Set up TotK Recomp with your own lawfully obtained game resources and locate the resulting `totk.exe`. [Upstream project and setup instructions](https://github.com/valentderah/totk-pc-recomp)
-2. For a first install, build the manager with the Windows guide. The public **v1.2.9 Windows x64 update ZIP** is for an existing manager installation. It uses that installation's Python environment and any local components. Verify the ZIP with `SHA256SUMS.txt` before applying it. [Build guide](docs/build.md) · [First upgrade and online updates](docs/manager-update.md) · [v1.2.9 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.9)
+2. For a first install, build the manager with the Windows guide. The public **v1.3.0 Windows x64 update ZIP** uses an existing manager installation's Python environment and local components. On v1.2.9, open **Settings → About and manager updates**. For a manual update, verify the ZIP with `SHA256SUMS.txt`. [Build guide](docs/build.md) · [First upgrade and online updates](docs/manager-update.md) · [v1.3.0 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.0)
 3. Select your existing `totk.exe` and inspect its detected version. Choose controller, graphics or combined installation if you have a compatible local component bundle. Configure supported options in the game's F1 menu after installation.
 
 The GitHub repository publishes source, documentation and reviewed manager-only updates. Offline installation of all six CPU/component combinations requires a matching local payload. The v1.2.8 GitHub Release contains source archives. [Release audit](docs/release-audit.md) · [v1.2.8 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.8)
@@ -25,7 +26,7 @@ The GitHub repository publishes source, documentation and reviewed manager-only 
 
 | Version | Meaning |
 | --- | --- |
-| **Manager version** | v1.2.9 is the manager release that introduces online self-updates. |
+| **Manager version** | v1.3.0 adds the Mod Center. Online self-updates are available starting with v1.2.9. |
 | **Detected upstream version** | The manager reads the version of the selected TotK Recomp executable. Use **Installation → Check upstream updates** to query newer upstream releases. |
 | **Verified compatibility** | The current offline payload is built from **TotK Recomp 0.4.0**. The audited v1.2.8 package exercised six offline combinations, install/repair/rollback and PS5 prompts at 1920×1080 and 3840×1080. Historical validation covers a **0.3.13 → 0.4.0** migration. |
 | **Game resource version** | **1.4.3** is the verified game resource version for the current offline payload. The manager checks game resources separately against the chosen package or upstream build metadata. |
@@ -59,11 +60,12 @@ Nintendo, The Legend of Zelda and other names and marks belong to their respecti
 - **图形增强**。支持 NVIDIA DLSS／DLAA、包括手动 M 在内的模型选择、上游 FSR 1 空间放大，以及独立的 NVIDIA DLSS 或 AMD FSR 帧生成。可用性取决于运行时、显卡、驱动和本地库。
 - **安装与维护**。支持版本检测、匹配成品的离线安装、修复、备份回滚、安全启动、着色器预热及 HDR／SDR 诊断。
 - **管理器更新**。提供稳定版和测试版、更新公告、校验下载、GH-Proxy 加速与 GitHub 直连回退。新版启动失败时可恢复旧版。
+- **MOD 管理**。导入 ZIP 和文件夹，使用与 F1 共用的启停状态和优先级，提供冲突诊断、配置方案和撤销。 [使用说明](docs/mod-manager.md)
 
 ### 下载与安装
 
 1. 使用自行合法取得的游戏资源完成 TotK Recomp 安装，找到生成的 `totk.exe`。 [上游安装说明](https://github.com/valentderah/totk-pc-recomp)
-2. 首次安装可按构建说明生成管理器。公开的 **v1.2.9 Windows x64 更新 ZIP** 用于升级已有管理器，需要原安装的 Python 环境及本地组件。应用前用 `SHA256SUMS.txt` 校验。 [Windows 构建说明](docs/build.md) · [首次升级与在线更新](docs/manager-update.md) · [v1.2.9 下载](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.9)
+2. 首次安装可按构建说明生成管理器。公开的 **v1.3.0 Windows x64 更新 ZIP** 用于升级已有管理器，沿用原安装的 Python 环境及本地组件。v1.2.9 可通过「设置 → 关于与管理器更新」升级。手动更新时请先用 `SHA256SUMS.txt` 校验。 [Windows 构建说明](docs/build.md) · [首次升级与在线更新](docs/manager-update.md) · [v1.3.0 下载](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.0)
 3. 在管理器里选择已有 `totk.exe`，查看版本检测结果。有兼容的本地成品时，可选 PS5、图形或整合安装。安装后用游戏内 F1 调整可用功能。
 
 GitHub 仓库提供源码、文档和通过分发审核的管理器更新。六种离线 CPU／组件组合需要匹配的本地成品。v1.2.8 的 GitHub Release 提供源码。 [发布审计](docs/release-audit.md) · [v1.2.8 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.8)
@@ -72,7 +74,7 @@ GitHub 仓库提供源码、文档和通过分发审核的管理器更新。六�
 
 | 版本 | 含义 |
 | --- | --- |
-| **工具自身版本** | v1.2.9 为管理器版本，从该版开始支持管理器在线更新。 |
+| **工具自身版本** | v1.3.0 新增 MOD 管理。管理器在线更新自 v1.2.9 起提供。 |
 | **实际识别的上游版本** | 从所选 TotK Recomp 程序中读取。通过「安装管理 → 检查上游更新」查看上游新版本。 |
 | **已验证兼容版本** | 当前离线成品基于 **TotK Recomp 0.4.0**。v1.2.8 审计覆盖六种离线组合、安装修复回滚，以及 1920×1080、3840×1080 的 PS5 提示。历史验收覆盖 **0.3.13 → 0.4.0** 的迁移。 |
 | **游戏资源版本** | 当前离线成品已验证 **1.4.3**。管理器根据所用成品清单或上游构建元数据单独核验游戏资源。 |
