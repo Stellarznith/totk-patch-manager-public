@@ -196,31 +196,43 @@ def get_json(url):
     raise RuntimeError('无法查询官方更新。'+'；'.join(errors))
 
 
-def download(url, target, expected=None):
+def download(url, target, expected=None, expected_size=None):
     routes=network_routes(url)
+    if expected_size is not None and len(routes)==1:routes*=2
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_file() and (digest(target) == expected if expected else usable_archive(target)):
+    if (target.is_file() and (expected_size is None or target.stat().st_size == expected_size)
+            and (digest(target) == expected if expected else usable_archive(target))):
         return target
     part = target.with_suffix(target.suffix + '.part')
     emit('正在下载：' + target.name)
     errors=[]
     for route,address in routes:
-        cancelled();last=0
+        cancelled();last=0;started=time.monotonic()
         try:
             emit('下载线路：'+route)
             req=urllib.request.Request(address,headers={'User-Agent':'TotK-Extension-Manager/1.1'})
             with urllib.request.urlopen(req,timeout=15) as src,part.open('wb') as dst:
                 total=int(src.headers.get('Content-Length',0));done=0
                 while block:=src.read(1024*1024):
-                    cancelled();dst.write(block);done+=len(block)
+                    cancelled();done+=len(block)
+                    if expected_size is not None and done>expected_size:raise ValueError('下载大小超过 GitHub 公布值。')
+                    dst.write(block)
                     if time.monotonic()-last>2:
-                        emit('下载 %.1f MB%s' % (done/1024**2,' / %.1f MB' % (total/1024**2) if total else ''));last=time.monotonic()
+                        message='下载 %.1f MB%s' % (done/1024**2,' / %.1f MB' % (total/1024**2) if total else '')
+                        if expected_size:
+                            speed=done/max(time.monotonic()-started,.01)/1024**2
+                            emit(message+' · %.2f MB/s' % speed,progress=dict(done=done,total=expected_size))
+                        else:emit(message)
+                        last=time.monotonic()
             if total and done!=total:raise ValueError('下载中断，长度不完整。')
+            if expected_size is not None and done!=expected_size:raise ValueError('下载大小与 GitHub 公布值不一致。')
             if expected and digest(part)!=expected:raise ValueError('下载文件 SHA-256 校验失败。')
             if target.suffix.lower()=='.zip' and not zipfile.is_zipfile(part):raise ValueError('下载结果不是 ZIP 压缩包。')
             os.replace(part,target)
-            emit('下载完成并通过校验：'+target.name)
+            message='下载完成并通过校验：'+target.name
+            if expected_size:emit(message,progress=dict(done=done,total=expected_size))
+            else:emit(message)
             return target
         except (OSError,ValueError,http.client.HTTPException) as e:
             errors.append(route+': '+str(e));emit(route+'下载失败，尝试可用备用线路。')
@@ -1341,6 +1353,18 @@ def dispatch(request):
     if action == 'check':
         info, asset = release()
         emit('官方最新正式版：' + info['tag_name'], result=dict(version=info['tag_name'].removeprefix('v'), notes=info['body'], url=info['html_url']))
+        return
+    if action in ('manager-check','manager-update'):
+        import manager_update
+        info=manager_update.update_info(APP,manager_update.fetch_release(request.get('channel','stable'),cancelled))
+        if action == 'manager-update':
+            if (info['status']!='available' or info['version']!=request.get('version')
+                    or info['sha256']!=request.get('sha256')):
+                raise ValueError('GitHub 上的可安装版本已变化，请重新检查。')
+            manager_update.prepare(APP,info,download)
+            emit('更新包已校验，退出管理器后开始安装。',result=dict(version=info['version']))
+        else:
+            emit('GitHub 管理器发行版：'+info['version'],result=info)
         return
     ctx = context(request['game'])
     if action == 'inspect':

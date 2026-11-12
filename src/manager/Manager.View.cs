@@ -70,6 +70,7 @@ public partial class Manager {
             LoadSettings();
             LayoutRail();
             if (selftest) return;
+            if (managerAuto.Checked) BeginInvoke(new Action(async () => await CheckManager(false, true)));
             await DetectGpu();
             if (selected != "") await Inspect();
             if (automatic.Checked) await Check(false);
@@ -176,16 +177,26 @@ public partial class Manager {
         ps5 = new ToggleSwitch(density);
         graphics = new ToggleSwitch(density);
         automatic = new ToggleSwitch(density);
+        managerAuto = new ToggleSwitch(density);
         cleanup = new ToggleSwitch(density);
         iconStyle = new DarkCombo(density);
         network = new DarkCombo(density);
         language = new DarkCombo(density);
+        managerChannel = new DarkCombo(density);
         MakeCombo(iconStyle, new object[] { "Stellarznith", "Stavaas", "Alerion" }, true);
         MakeCombo(network, new object[] { "自动 · 优先 GH-Proxy，失败后尝试 GitHub", "仅 GH-Proxy 加速（gh-proxy.com）", "仅 GitHub 直连" }, true);
         MakeCombo(language, new object[] { "自动（跟随游戏语言）", "简体中文", "English", "Русский", "Português (Brasil)" }, false);
+        MakeCombo(managerChannel, new object[] { "稳定版", "测试版（包含正式版）" }, false);
+        managerChannel.SelectedIndexChanged += (s, e) => {
+            if (loading) return;
+            managerRelease = null;
+            managerUpdateStatus.Text = "当前管理器 · " + managerVersion;
+            Save();
+        };
         MakeToggle(ps5, "安装 PS5 图标与 USB 触觉支持", true, Save);
         MakeToggle(graphics, "安装新版 DLSS 与帧生成", true, Save);
         MakeToggle(automatic, "打开管理器时检查上游更新", false, Save);
+        MakeToggle(managerAuto, "启动时后台检查管理器更新", true, Save);
         MakeToggle(cleanup, "同时收纳外置 MOD、注入 DLL 和旧补丁入口", true, null);
         compactNavigation = new ToggleSwitch(density);
         MakeToggle(compactNavigation, "始终使用紧凑图标导航", false, () => { LayoutRail(); Save(); });
@@ -258,6 +269,13 @@ public partial class Manager {
                 Command("cleanup-owned", "收纳补丁残留", Symbol.Package, ButtonTone.Secondary, async () => await Action("cleanup-owned"))));
 
         var settings = Page("设置", "管理游戏路径、菜单语言、下载线路和导航外观。");
+        Card(settings, "关于与管理器更新", "从本项目的 GitHub Release 获取版本和公告。",
+            Status(managerUpdateStatus, "当前管理器 · " + managerVersion, Theme.Text),
+            managerAuto, Status(new Label(), "更新渠道", Theme.Text), managerChannel,
+            Row(Command("manager-check", "检查更新", Symbol.Search, ButtonTone.Secondary, async () => await CheckManager(false)),
+                Command("manager-update", "下载并安装", Symbol.Download, ButtonTone.Primary, async () => await CheckManager(true)),
+                Command("manager-notes", "查看更新公告", Symbol.Log, ButtonTone.Quiet, async () => await ShowManagerNotes()),
+                Command("manager-release", "在 GitHub 查看", Symbol.Log, ButtonTone.Quiet, async () => await OpenManagerRelease())));
         Card(settings, "游戏路径", null, PathFrame(settingsPath), Row(Pick(), Discover()));
         var preferences = new ActionRow { BackColor = Theme.Canvas, Margin = Insets(0), EqualColumnsFrom = D(650) };
         var languageCard = Card(settings, "游戏菜单语言", "语言为自动时跟随游戏语言。游戏内 F1 已选择的语言仍优先。",
@@ -268,8 +286,8 @@ public partial class Manager {
         preferences.Controls.Add(languageCard);
         preferences.Controls.Add(appearanceCard);
         settings.Controls.Add(preferences);
-        Card(settings, "更新与下载", "自动检查只获取版本信息。",
-            automatic, Status(new Label(), "下载线路", Theme.Text), network);
+        Card(settings, "下载线路", "管理器更新包和上游资源共用此线路。管理器版本和校验值由 GitHub 提供。",
+            network, automatic);
     }
 
     PageColumn Page(string heading, string description) {

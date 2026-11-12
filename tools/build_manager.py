@@ -53,7 +53,7 @@ def main() -> None:
 
     output.mkdir(parents=True)
     print(f"recipe_id={make_recipe(args.upstream, output / 'recipe.zip')}", flush=True)
-    for name in ("core.py", "manager_install.py", "manager-version.txt", EXE + ".config"):
+    for name in ("core.py", "manager_install.py", "manager_update.py", "manager-version.txt", EXE + ".config"):
         shutil.copyfile(MANAGER / name, output / name)
 
     runtime = output / "python"

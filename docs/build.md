@@ -18,10 +18,10 @@
 $upstream = '../totk-pc-recomp-7a37fc3c346cd6f2b3c80637effb27b880ce817b'
 $pythonKit = '../TotK-Setup-0.4.0-windows/python'
 & "$pythonKit/python.exe" -X utf8 tools/build_manager.py `
-  --upstream $upstream --python-kit $pythonKit --output build/app-1.2.8
+  --upstream $upstream --python-kit $pythonKit --output build/app
 ```
 
-输出为 `build/app-1.2.8/王国之泪补丁管理器.exe`、后端脚本、版本标记、运行环境和 `recipe.zip`。输出目录必须是新目录。工具按配方成员名和原始内容计算 `recipe_id`，预期为 `67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c`。ZIP 容器的条目顺序和时间戳可与审计候选不同。
+输出为 `build/app/王国之泪补丁管理器.exe`、后端脚本、版本标记、运行环境和 `recipe.zip`。输出目录必须是新目录。工具按配方成员名和原始内容计算 `recipe_id`，预期为 `67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c`。ZIP 容器的条目顺序和时间戳可与审计候选不同。
 
 可单独生成运行时配方。
 
@@ -42,8 +42,9 @@ $pythonKit = '../TotK-Setup-0.4.0-windows/python'
 
 ```powershell
 & "$pythonKit/python.exe" -X utf8 tests/test_manager.py
-Start-Process -FilePath (Resolve-Path 'build/app-1.2.8/王国之泪补丁管理器.exe') -ArgumentList '--selftest --dpi 144' -Wait
-Get-Content build/app-1.2.8/ui-validation.txt
+& "$pythonKit/python.exe" -X utf8 tests/test_manager_update.py -v
+Start-Process -FilePath (Resolve-Path 'build/app/王国之泪补丁管理器.exe') -ArgumentList '--selftest --dpi 144' -Wait
+Get-Content build/app/ui-validation.txt
 ```
 
 回归使用临时目录。默认跳过需要真实资源的独立图标测试。若使用自有测试数据，设置 `TOTK_TEST_ROMFS`、`TOTK_TEST_INDEX` 和含匹配资产的 `TOTK_TEST_APP`。图形自检需要有可用的 Windows 桌面会话。

@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Management;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -39,7 +41,8 @@ public partial class Manager : Form {
         busy = value;
         foreach (var button in work) button.Enabled = !value;
         ps5.Enabled = graphics.Enabled = controllerOption.Enabled = videoOption.Enabled =
-            automatic.Enabled = network.Enabled = language.Enabled = iconStyle.Enabled = cleanup.Enabled = !value;
+            automatic.Enabled = managerAuto.Enabled = managerChannel.Enabled = network.Enabled =
+            language.Enabled = iconStyle.Enabled = cleanup.Enabled = !value;
         cancel.Enabled = cancel.Visible = value;
         progress.Visible = value;
         progress.Style = ProgressBarStyle.Marquee;
@@ -76,6 +79,8 @@ public partial class Manager : Form {
             ps5.Checked = !s.ContainsKey("ps5") || Convert.ToBoolean(s["ps5"]);
             graphics.Checked = !s.ContainsKey("graphics") || Convert.ToBoolean(s["graphics"]);
             automatic.Checked = s.ContainsKey("auto") && Convert.ToBoolean(s["auto"]);
+            managerAuto.Checked = !s.ContainsKey("manager_auto") || Convert.ToBoolean(s["manager_auto"]);
+            managerChannel.SelectedIndex = Value(s, "manager_channel") == "preview" ? 1 : 0;
             compactNavigation.Checked = s.ContainsKey("compact_navigation") && Convert.ToBoolean(s["compact_navigation"]);
             string route = Value(s, "network");
             network.SelectedIndex = route == "mirror" ? 1 : route == "direct" ? 2 : 0;
@@ -93,6 +98,8 @@ public partial class Manager : Form {
             values["ps5"] = ps5.Checked;
             values["graphics"] = graphics.Checked;
             values["auto"] = automatic.Checked;
+            values["manager_auto"] = managerAuto.Checked;
+            values["manager_channel"] = ManagerChannel();
             values["network"] = NetworkMode();
             values["style"] = iconStyles[Math.Max(0, iconStyle.SelectedIndex)];
             values["compact_navigation"] = compactNavigation.Checked;
@@ -102,10 +109,10 @@ public partial class Manager : Form {
             else File.Move(pending, file);
         } catch (Exception e) { Append("设置保存失败：" + e.Message); }
     }
-    async Task<Dictionary<string,object>> Execute(string action,Dictionary<string,object> extra=null) {
-        if(busy)return null;
-        if(action!="check"&&action!="discover"&&selected==""){Append("请先选择游戏。");UpdateTaskStatus("请先选择游戏程序", Theme.Warning);return null;}
-        SetBusy(true);
+    async Task<Dictionary<string,object>> Execute(string action,Dictionary<string,object> extra=null,bool background=false) {
+        if(busy&&!background)return null;
+        if(action!="check"&&action!="discover"&&action!="manager-check"&&action!="manager-update"&&selected==""){Append("请先选择游戏。");UpdateTaskStatus("请先选择游戏程序", Theme.Warning);return null;}
+        if (!background) SetBusy(true);
         Dictionary<string,object> result=null;bool success=false;string failure="";
         try {
             var id = Guid.NewGuid().ToString("N");
@@ -113,8 +120,11 @@ public partial class Manager : Form {
             Directory.CreateDirectory(requests);
             var request = new Dictionary<string, object> { { "action", action }, { "game", selected },
                 { "ps5", ps5.Checked }, { "graphics", graphics.Checked }, { "network", NetworkMode() }, { "cache", Path.Combine(app, "cache") } };
-            cancelFile = Path.Combine(requests, id + ".cancel");
-            request["cancel"] = cancelFile;
+            if (background) request["cache"] = Path.Combine(app, "cache", "manager-update", "check");
+            else {
+                cancelFile = Path.Combine(requests, id + ".cancel");
+                request["cancel"] = cancelFile;
+            }
             if (extra != null) foreach (var pair in extra) request[pair.Key] = pair.Value;
             var file = Path.Combine(requests, id + ".json");
             File.WriteAllText(file, json.Serialize(request), new UTF8Encoding(false));
@@ -129,7 +139,7 @@ public partial class Manager : Form {
                             .Replace("“按当前版本重编译”", "「安装管理 → 高级安装 → 重编当前版本」");
                         Append(message);
                         if (row.ContainsKey("error") && Convert.ToBoolean(row["error"])) failure = message;
-                        if (row.ContainsKey("progress")) {
+                        if (!background && row.ContainsKey("progress")) {
                             var step = Dict(row["progress"]);
                             long total = Convert.ToInt64(step["total"]), done = Convert.ToInt64(step["done"]);
                             if (total > 0) {
@@ -138,7 +148,7 @@ public partial class Manager : Form {
                                 progress.Value = (int)Math.Max(0, Math.Min(100, (double)done * 100 / total));
                                 UpdateTaskStatus(progress.Value + "%  ·  " + message, Theme.Accent);
                             }
-                        } else if (message != "") {
+                        } else if (!background && message != "") {
                             UpdateTaskStatus(message, Theme.Accent);
                         }
                         if (row.ContainsKey("result")) result = Dict(row["result"]);
@@ -147,11 +157,11 @@ public partial class Manager : Form {
                 }
                 await Task.Run(()=>p.WaitForExit());var stderr=await errors;if(stderr!="")Append(stderr);success=p.ExitCode==0;
             }
-        } catch(Exception e){failure=e.Message;Append("操作失败："+e.Message);}finally{if(action!="inspect"&&action!="check"&&action!="discover"){lastFailed=!success;lastOutcome=success?(action.StartsWith("launch")?"游戏进程已启动":"操作完成，已校验"):"操作失败，请查看日志";}SetBusy(false);cancelFile="";}
-        if (!success) {
+        } catch(Exception e){failure=e.Message;Append("操作失败："+e.Message);}finally{if(!background){if(action!="inspect"&&action!="check"&&action!="discover"){lastFailed=!success;lastOutcome=success?(action.StartsWith("launch")?"游戏进程已启动":"操作完成，已校验"):"操作失败，请查看日志";}SetBusy(false);cancelFile="";}}
+        if (!success && !background) {
             string detail = failure != "" ? failure : "详细原因见操作日志。";
             UpdateTaskStatus(detail, Theme.Warning);
-            if (action != "inspect" && action != "check" && action != "discover") {
+            if (action != "inspect" && action != "check" && action != "discover" && action != "manager-check") {
                 SetLogOpen(true);
                 if (!selftest) MessageBox.Show(this, detail, action.StartsWith("launch") ? "启动未完成" : "操作未完成",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -236,9 +246,30 @@ public partial class Manager : Form {
     [STAThread] public static void Main(string[] args) {
         selftest=args.Length>0&&args[0].StartsWith("--selftest");
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
-        using (var window = new Manager(selftest ? PreviewOption(args, "--dpi") : 0)) {
-            if (selftest) window.Shown += async (s, e) => await window.RunPreview(args);
-            Application.Run(window);
+        string folder = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
+        string mutexName;
+        using (var sha = SHA256.Create())
+            mutexName = @"Local\TotKPatchManager-" + BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(folder.ToUpperInvariant())));
+        bool ownsMutex;
+        using (var instance = new Mutex(true, mutexName, out ownsMutex)) {
+            if (!ownsMutex) return;
+            try {
+                var update = Path.Combine(folder, "cache", "manager-update");
+                var trial = Path.Combine(update, "trial.json");
+                string token = TrialToken(args, trial);
+                if (token == "" && (File.Exists(trial) || File.Exists(Path.Combine(update, "ready.json")) ||
+                    File.Exists(Path.Combine(update, "pending.json")))) {
+                    try { StartUpdateWorker(folder); }
+                    catch (Exception e) { MessageBox.Show(e.Message, "无法恢复管理器更新", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                    return;
+                }
+                using (var window = new Manager(selftest ? PreviewOption(args, "--dpi") : 0)) {
+                    if (selftest) window.Shown += async (s, e) => await window.RunPreview(args);
+                    if (token != "") window.Shown += (s, e) => window.BeginInvoke(new Action(() =>
+                        ConfirmManagerStartup(window, update, token)));
+                    Application.Run(window);
+                }
+            } finally { instance.ReleaseMutex(); }
         }
     }
 }
