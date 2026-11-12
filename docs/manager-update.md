@@ -1,5 +1,7 @@
 # 管理器在线更新
 
+管理器在本仓库检查工具自身的发行版。「安装管理」中的上游更新入口查询 TotK Recomp 自己的发行版。安装本页的更新 ZIP 只替换管理器文件。内置成品的 0.4.0 和游戏资源 1.4.3 是当前已验证组合，程序会另行检测所选游戏安装。 [上游兼容与版本说明](../README.md#upstream-compatibility-and-updates) · [TotK Recomp 发行版](https://github.com/valentderah/totk-pc-recomp/releases)
+
 ## 从 v1.2.8 首次升级
 
 v1.2.8 的程序没有自更新入口。请从 [v1.2.9 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.9) 下载 Windows x64 管理器更新 ZIP 和 `SHA256SUMS.txt`。在 PowerShell 用 `Get-FileHash -Algorithm SHA256 <ZIP 路径>` 核对后，关闭管理器并把 ZIP 中的管理器文件解压到原目录。更新 ZIP 需要现有管理器的 `python/` 和本地组件文件。新用户可以先从源码构建管理器。
