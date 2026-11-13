@@ -482,6 +482,12 @@ int probe_cfg(void) {
               EQ(cfg_meta("TOTK_PS5_PROMPT_STYLE")->values, "0|1|2"),
           "ps5 icons: the style defaults to white and has three values");
     cfg_load("cfg-probe-missing.ini");
+    // The walk asserts the table defaults. A Steam Deck profile (SteamDeck=1 set by the
+    // launcher, or DEVICE_PROFILE) overrides six of them above the table by design (cfg.c
+    // DECK); the probe checks the table, so it runs with the desktop profile.
+    plat_setenv("SteamDeck", NULL);
+    plat_setenv("SteamOS", NULL);
+    plat_setenv("TOTK_DEVICE_PROFILE", NULL);
     int listed = 0;
     for (int i = 0; cfg_meta_at(i); i++) {
         const CfgMeta *m = cfg_meta_at(i);

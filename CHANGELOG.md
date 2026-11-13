@@ -1,5 +1,11 @@
 # 更新记录 · Changelog
 
+## 1.3.3
+
+- Fixed probe-cfg failing (FAIL cfg: cfg_value returns the table default) when a launcher or handheld tool injects SteamDeck=1 / SteamOS=1: the Steam Deck device profile deliberately overrides six table defaults, and the probe now runs with the desktop profile instead (cfg_probe.c).
+- The manager strips SteamDeck / SteamOS / TOTK_DEVICE_PROFILE from the environment of probe and prewarm runs only; normal game launches keep the device profile untouched.
+- Rebuilt the bundled recipe with the probe fix (recipe_id f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516).
+
 ## 1.3.2
 
 - 修复重编当前版本时报「cfg.c 上游与扩展修改了同一段代码（第 124-124 行与第 123-126 行重叠）」的问题。旧版完整包留下的 recipe-0.3.13.zip 在上游不是 0.4.0 时被直接套用，现在管理器按上游版本精确匹配配方，不再盲切旧配方。

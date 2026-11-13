@@ -1189,7 +1189,7 @@ def install_prebuilt(ctx,ps5,graphics,cache,repair=False):
             encoded=name.encode()+b'\0';entries+=struct.pack('<QQII',at,size,len(strings),len(encoded));strings+=encoded
         (stage/'romfs-index.bin').write_bytes(struct.pack('<8sQQ',b'TOTKRFS1',len(rows),24+len(entries))+entries+strings)
         files['romfs-index.bin']=digest(stage/'romfs-index.bin')
-    environment=launch_env(ctx);environment.update(TOTK_DLAA='0',TOTK_FRAMEGEN='off',TOTK_DUALSENSE_HD='0',TOTK_PHYSICAL_INPUT='0',TOTK_PROFILE_DIR=str(stage/'probe-profile'))
+    environment=launch_env(ctx, probe=True);environment.update(TOTK_DLAA='0',TOTK_FRAMEGEN='off',TOTK_DUALSENSE_HD='0',TOTK_PHYSICAL_INPUT='0',TOTK_PROFILE_DIR=str(stage/'probe-profile'))
     for mode in ('--probe-cfg','--probe-loader'):
         run([stage/'totk.exe',mode,'--exefs',ctx['exefs'],'--romfs',ctx['romfs'],'--profile',stage/'probe-profile'],stage,environment)
     metadata=dict(version=manifest['version'],source_commit=manifest['source_commit'],ps5=ps5,graphics=graphics,official=False,game_version=game_version,recipe_id=manifest['recipe_id'],prebuilt_id=identity,install_method='prebuilt',cpu=tier)
@@ -1377,10 +1377,17 @@ def install_shaped_ps5(output, groups, archive, items):
             link(inside(output, base + '/' + logical), inside(output, folder + '/' + logical))
 
 
-def launch_env(ctx):
+def launch_env(ctx, probe=False):
     env = os.environ.copy()
     for key in list(env):
         if key.startswith('TOTK_'):
+            env.pop(key)
+    # The probes assert the plain table defaults, which a Steam Deck device profile
+    # deliberately overrides above the table (cfg.c DECK); a launcher or handheld tool
+    # may inject SteamDeck=1 and trip them. Only the probe paths need it stripped.
+    if probe:
+        lowered = {key.upper() for key in env}
+        for key in [k for k in lowered if k in ('STEAMDECK', 'STEAMOS', 'TOTK_DEVICE_PROFILE')]:
             env.pop(key)
     env.update(TOTK_EXEFS=ctx['exefs'], TOTK_ROMFS=ctx['romfs'], TOTK_PROFILE_DIR=ctx['profile'],
                TOTK_MODS_DIR=str(Path(ctx['game']).parent / 'mods'))
@@ -1719,7 +1726,7 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
                 shutil.copy2(original / name, deployment / name)
     managed = [p for p in deployment.rglob('*') if p.is_file() and (p.suffix.lower() in ['.exe','.dll','.id'] or any(part.startswith(ICON_FOLDER) for part in p.parts))]
     if official:managed.append(deployment/'romfs-index.bin')
-    env = launch_env(ctx)
+    env = launch_env(ctx, probe=True)
     env.update(TOTK_PHYSICAL_INPUT='0', TOTK_DUALSENSE_HD='0')
     test_profile = work / 'probe-profile'
     env['TOTK_PROFILE_DIR'] = str(test_profile)
@@ -1987,7 +1994,7 @@ def dispatch(request):
         info,asset=component_release(cache,tag);kit,source=toolkit(cache,info,asset)
         main_sha=digest(Path(ctx['exefs'])/'main');versions=[p.stem.removeprefix('expected-v') for p in (source/'tools/data').glob('expected-v*.json') if read_json(p).get('exefs_sha256',{}).get('main')==main_sha]
         if len(versions)!=1:raise ValueError('官方工具未识别此游戏资源，未预热。')
-        root=Path(ctx['game']).parent;env=launch_env(ctx);env.update(TOTK_DLAA='0',TOTK_FRAMEGEN='off',TOTK_DUALSENSE_HD='0',TOTK_PROFILE_DIR=str(cache/'prewarm-profile'))
+        root=Path(ctx['game']).parent;env=launch_env(ctx, probe=True);env.update(TOTK_DLAA='0',TOTK_FRAMEGEN='off',TOTK_DUALSENSE_HD='0',TOTK_PROFILE_DIR=str(cache/'prewarm-profile'))
         rows=local_resources(ctx);local_index=cache/'prewarm-index.json'
         write_json(local_index,dict(status='pass',romfs_size=(Path(ctx['romfs'])/'romfs.bin').stat().st_size,romfs_sha256='',files=[dict(path=name,offset=at,size=n) for name,(at,n) in rows.items()]))
         env.update(TOTK_MANAGER_SOURCE_INDEX=str((Path(ctx['romfs'])/'index.json').resolve()),TOTK_MANAGER_LOCAL_INDEX=str(local_index))
