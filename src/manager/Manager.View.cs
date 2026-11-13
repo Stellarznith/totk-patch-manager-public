@@ -250,6 +250,14 @@ public partial class Manager {
             Row(Command("update", "更新上游并重编", Symbol.Download, ButtonTone.Secondary, async () => await Build("update")),
                 Command("rebuild-current", "重编当前版本", Symbol.Refresh, ButtonTone.Secondary, async () => await Build("rebuild-current")),
                 Command("prewarm-shaders", "全量预热", Symbol.Display, ButtonTone.Quiet, async () => await Action("prewarm-shaders"))));
+        Card(install, "三种更新各自独立", "管理器本身、上游程序和适配配方分别更新，互不牵连；任一项都可单独保留旧版本。",
+            Row(Command("triple-manager", "① 管理器更新", Symbol.Search, ButtonTone.Quiet, async () => await CheckManager(false)),
+                Command("triple-upstream", "② 检查上游程序", Symbol.Search, ButtonTone.Secondary, async () => await Check(true)),
+                Command("recipe-check", "③ 检查适配配方", Symbol.Search, ButtonTone.Secondary, async () => await CheckRecipes(false))),
+            Row(Command("triple-upgrade", "一键升级上游并安装", Symbol.Download, ButtonTone.Primary, async () => await Build("update")),
+                Command("recipe-sync", "下载可用适配配方", Symbol.Download, ButtonTone.Secondary, async () => await CheckRecipes(true))),
+            Status(managerRecipeStatus, "本机适配配方：读取中", Theme.Text),
+            Hint("无法按当前版本安全适配时，用「一键升级上游并安装」升到官方最新正式版后再装扩展；想留在旧上游时不点它即可，管理器不会擅自升级或降级。"));
         Disclosure(install, "官方还原", "用上游源码重建原版程序。损坏的游戏资源需要原始文件。",
             cleanup, Row(Command("cleanup-scan", "检查多余文件", Symbol.Search, ButtonTone.Secondary, async () => await Action("cleanup-scan")),
                 Command("restore-official", "还原官方并重编", Symbol.Shield, ButtonTone.Secondary,

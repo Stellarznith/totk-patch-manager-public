@@ -18,13 +18,15 @@ import urllib.error
 ROOT = Path(__file__).resolve().parents[1]
 MANAGER = ROOT / 'src/manager'
 sys.path.insert(0, str(MANAGER))
+sys.path.insert(0, str(ROOT / 'tools'))
+import workspace
 spec = importlib.util.spec_from_file_location('manager_core', MANAGER / 'core.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 
 class ManagerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='totk-manager-')
+        self.temp = workspace.directory('totk-manager-')
         self.root = Path(self.temp.name)
         self.app = m.APP
         m.APP = self.root / 'manager'
@@ -81,6 +83,107 @@ class ManagerTests(unittest.TestCase):
     def test_three_way_already_merged_and_new_file(self):
         self.assertEqual(m.merge_source('a\n','x\n','x\n'),'x\n')
         self.assertEqual(m.merge_source('','new\n',''),'new\n')
+
+    def recipe(self, basis, pairs, commit=''):
+        """Write an adapter shaped like tools/make_recipe.py does: pairs is {file: (base, modified)}."""
+        files = {}
+        with zipfile.ZipFile(m.APP / ('recipe-%s.zip' % basis), 'w') as z:
+            for index, (name, (base, modified)) in enumerate(sorted(pairs.items())):
+                z.writestr('%d/base' % index, base)
+                z.writestr('%d/modified' % index, modified)
+                files[name] = dict(base='%d/base' % index, modified='%d/modified' % index)
+            z.writestr('manifest.json', json.dumps(dict(basis=basis, source_commit=commit, files=files)))
+        return m.APP / ('recipe-%s.zip' % basis)
+
+    def upstream(self, version, runtime):
+        tree = self.root / ('upstream ' + version)
+        (tree / 'recomp').mkdir(parents=True); (tree / 'recomp/gen.py').write_text('')
+        (tree / 'tools').mkdir(); (tree / 'tools/build_game.py').write_text('')
+        (tree / 'VERSION').write_text(version + '\n', encoding='utf-8')
+        for name, text in runtime.items():
+            p = tree / 'runtime' / name
+            p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding='utf-8')
+        return tree
+
+    def test_leftover_adapter_for_another_basis_is_never_applied(self):
+        base = 'a\nb\nc\n'
+        self.recipe('0.3.13', {'cfg.c': (base, 'a\nPS5\nc\n')})
+        source = self.upstream('0.3.4', {'cfg.c': base})
+        with self.assertRaises(ValueError) as caught:
+            m.recipe_plan(source)
+        self.assertIn('低于本机所有适配配方', str(caught.exception))
+
+    def test_newer_upstream_version_adapts_by_content_not_by_number(self):
+        base = 'a\nb\nc\n'
+        self.recipe('0.4.0', {'cfg.c': (base, 'a\nPS5\nc\n')})
+        source = self.upstream('0.5.0', {'cfg.c': base})
+        entry, merged, rebased = m.recipe_plan(source)
+        self.assertEqual(entry['mode'], 'rebased')
+        self.assertEqual(merged['cfg.c'], 'a\nPS5\nc\n')
+
+    def test_upstream_reindent_keeps_the_extension_edit(self):
+        base = 'header\nKEEP = 1\nPATCH_ME = 0\ntail\n'
+        self.recipe('0.4.0', {'cfg.c': (base, 'header\nKEEP = 1\nPATCH_ME = 7\ntail\n')})
+        reindented = '  header\n  KEEP = 1\n  PATCH_ME = 0\n  tail\n'
+        source = self.upstream('0.4.1', {'cfg.c': reindented})
+        with self.assertRaises(ValueError):
+            m.merge_source(base, 'header\nKEEP = 1\nPATCH_ME = 7\ntail\n', reindented)
+        entry, merged, rebased = m.recipe_plan(source)
+        self.assertEqual(entry['mode'], 'rebased')
+        self.assertIn('PATCH_ME = 7', merged['cfg.c'])
+        self.assertTrue(rebased)
+
+    def test_upstream_rewriting_the_patched_line_is_refused(self):
+        base = 'header\nPATCH_ME = 0\ntail\n'
+        self.recipe('0.4.0', {'cfg.c': (base, 'header\nPATCH_ME = 7\ntail\n')})
+        source = self.upstream('0.4.1', {'cfg.c': 'header\nPATCH_ME = 9\ntail\n'})
+        with self.assertRaises(ValueError) as caught:
+            m.recipe_plan(source)
+        self.assertIn('已被官方改写', str(caught.exception))
+
+    def test_missing_basis_never_borrows_another_archive_identity(self):
+        self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nb\n')})
+        self.assertEqual(m.recipe_id('9.9.9'), 'missing-recipe-9.9.9')
+        self.assertRegex(m.recipe_id('0.4.0'), r'^[0-9a-f]{64}$')
+
+    def test_adapter_check_and_sync_need_no_game_and_survive_offline(self):
+        self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nb\n')})
+        with mock.patch.object(m,'get_json',side_effect=ValueError('offline')), mock.patch.object(m,'emit') as emit:
+            m.main(dict(action='recipe-check',network='auto',cache=str(self.root/'cache')))
+            self.assertTrue(any('0.4.0' in call.args[0] for call in emit.call_args_list))
+            self.assertEqual(m.try_sync(self.root/'cache'), [])
+
+    def test_vendored_adapter_is_used_without_touching_the_network(self):
+        base = 'a\nb\n'
+        self.recipe('0.4.0', {'cfg.c': (base, 'a\nPS5\n')})
+        cache = self.root/'cache'/'recipes'; cache.mkdir(parents=True)
+        shutil.copyfile(m.APP/'recipe-0.4.0.zip', cache/'recipe-0.4.0.zip')
+        with mock.patch.object(m,'get_json',side_effect=AssertionError('unexpected network')), mock.patch.object(m,'download',side_effect=AssertionError('unexpected download')):
+            self.assertIn('0.4.0', [c['basis'] for c in m.recipe_candidates()])
+
+    def test_repeat_install_keeps_the_previous_rollback_point(self):
+        game,ctx=self.fixture();before=game.read_bytes();h=m.home(ctx)
+        staged=self.root/'prepared.exe';staged.write_bytes(b'MZ\0' + b'0.3.11\0')
+        metadata=dict(version='0.3.11',ps5=True,graphics=True)
+        first=m.manager_install.install(game.parent,h,{'totk.exe':staged},{'totk.exe'},metadata)
+        backups=len(list((h/'backups').iterdir()))
+        second=m.manager_install.install(game.parent,h,{'totk.exe':staged},{'totk.exe'},metadata)
+        self.assertEqual(second['backup'],first['backup'])
+        self.assertEqual(len(list((h/'backups').iterdir())),backups)
+        m.manager_install.rollback(game.parent,h)
+        self.assertEqual(game.read_bytes(),before)
+
+    def test_personal_backup_carries_mods_and_icon_styles(self):
+        game,ctx=self.fixture();root=game.parent
+        (root/'mods/PlayerMod').mkdir(parents=True);(root/'mods/PlayerMod/a.pchtxt').write_text('mod')
+        (root/(m.ICON_FOLDER+'-stavaas')).mkdir();(root/(m.ICON_FOLDER+'-stavaas/b.bin')).write_bytes(b'icon')
+        m.write_json(m.home(ctx)/'settings.json',dict(icon_style='stavaas'))
+        target=m.backup_personal(ctx)
+        with zipfile.ZipFile(target/'模组与设置.zip') as z:
+            names=set(z.namelist())
+        self.assertIn('mods/PlayerMod/a.pchtxt',names)
+        self.assertIn(m.ICON_FOLDER+'-stavaas/b.bin',names)
+        self.assertIn('manager/settings.json',names)
 
     def test_zip_path_traversal_rejected(self):
         for name in ['../escape','/outside','x\\..\\y','C:/outside']:

@@ -15,6 +15,8 @@ import zipfile
 
 SOURCE = Path(__file__).resolve().parents[1] / "src/manager"
 sys.path.insert(0, str(SOURCE))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import workspace
 import core
 import manager_update as update
 
@@ -31,7 +33,7 @@ class Response(io.BytesIO):
 
 class UpdateTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="管理器 更新测试 ")
+        self.temp = workspace.directory("管理器 更新测试 ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.app = self.root / "游戏管理器"

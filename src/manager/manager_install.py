@@ -119,6 +119,14 @@ def install(root,home,files,tracked,metadata,notify=lambda message:None,removals
             # A later mod's unrelated replacement is kept; it is no longer managed by this component.
             continue
         if before!=after:plan.append(dict(path=name,before=before,after=after))
+    if not plan:
+        # Nothing to copy. A repeat install of the same component must not consume the rollback point: a fresh empty
+        # journal would take rollback.json over and a later rollback would then have nothing to restore.
+        result=dict(metadata,mode='direct',files={name:current[name] for name in tracked},backup=previous.get('backup',''))
+        if result!=previous:save(home/'active.json',result)
+        (home/'pending.json').unlink(missing_ok=True)
+        notify('所选组件与当前安装完全一致，未改动任何文件；上一次安装的回退点保持不变。')
+        return result
     backup=home/'backups'/('install-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8])
     backup.mkdir(parents=True)
     copies = {}

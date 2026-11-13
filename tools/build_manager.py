@@ -11,6 +11,7 @@ import sys
 # The embedded Python _pth can omit the script's directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_recipe import ROOT, make_recipe
+import workspace
 
 MANAGER = ROOT / "src/manager"
 EXE = "王国之泪补丁管理器.exe"
@@ -44,15 +45,19 @@ def main() -> None:
 
     payload = args.local_payload
     if payload:
-        if (not (payload / "manager-version.txt").is_file()
-                or (payload / "manager-version.txt").read_bytes().strip() != b"1.2.8"
+        version = (payload / "manager-version.txt").read_bytes().strip() if (payload / "manager-version.txt").is_file() else b""
+        if (not version
                 or not (payload / "assets.zip").is_file()
                 or not (payload / "prebuilt/manifest.json").is_file()):
-            parser.error("--local-payload requires the unpacked v1.2.8 version, assets and manifest")
+            parser.error("--local-payload requires an unpacked payload with manager-version.txt, assets.zip and prebuilt/manifest.json")
         if output.is_relative_to(payload.resolve()):
             parser.error("Keep build output outside the private payload directory")
 
     output.mkdir(parents=True)
+    # The payload is copied wholesale; refuse before writing a single byte.
+    needed = sum(p.stat().st_size for p in payload.iterdir() if p.is_file()) if payload else 0
+    needed += 512 * 1024**2
+    workspace.require(output, needed, "构建输出目录")
     print(f"recipe_id={make_recipe(args.upstream, output / 'recipe.zip')}", flush=True)
     for name in ("manager_install.py", "manager_update.py", "manager-version.txt", EXE + ".config"):
         shutil.copyfile(MANAGER / name, output / name)
@@ -82,9 +87,10 @@ def main() -> None:
     if ".." not in lines:
         pth.write_text("\n".join([*lines, ".."]) + "\n", encoding="utf-8")
 
-    for name in ("assets.zip", "recipe-0.3.13.zip"):
-        if payload and (payload / name).is_file():
-            shutil.copyfile(payload / name, output / name)
+    # The 0.3.13 recipe is legacy history; 1.3.2 selects recipes strictly by
+    # the upstream basis, so a stale archive must never ride along.
+    if payload and (payload / "assets.zip").is_file():
+        shutil.copyfile(payload / "assets.zip", output / "assets.zip")
     if payload:
         shutil.copytree(payload / "prebuilt", output / "prebuilt")
 

@@ -11,6 +11,7 @@ using System.Windows.Forms;
 
 public partial class Manager {
     readonly Label managerUpdateStatus = new Label();
+    readonly Label managerRecipeStatus = new Label();
     ToggleSwitch managerAuto;
     ComboBox managerChannel;
     Dictionary<string, object> managerRelease;
@@ -53,6 +54,38 @@ public partial class Manager {
             Append("无法启动更新进程：" + e.Message);
             MessageBox.Show(this, "更新包已就绪。请关闭窗口后重新打开管理器以继续更新。\n" + e.Message, "管理器更新");
         }
+    }
+
+    static IEnumerable<object> RecipeRows(Dictionary<string, object> data, string key) {
+        object value;
+        if (data == null || !data.TryGetValue(key, out value) || value == null) yield break;
+        var array = value as object[];
+        if (array != null) { foreach (var item in array) yield return item; yield break; }
+        var list = value as System.Collections.IEnumerable;
+        if (list == null || value is string) yield break;
+        foreach (var item in list) yield return item;
+    }
+
+    async Task CheckRecipes(bool install) {
+        var result = await Execute(install ? "recipe-sync" : "recipe-check");
+        if (IsDisposed || result == null) {
+            managerRecipeStatus.Text = install ? "配方更新失败，请查看操作日志" : "配方检查失败，请查看操作日志";
+            FitCurrentPage();
+            return;
+        }
+        var names = new List<string>();
+        foreach (var item in RecipeRows(result, "local")) {
+            var row = item as Dictionary<string, object>;
+            if (row != null) names.Add(Value(row, "basis"));
+        }
+        names.Sort(StringComparer.Ordinal);
+        string summary = "本机适配配方：" + (names.Count == 0 ? "无" : String.Join("、", names.ToArray()));
+        var newer = new List<string>();
+        foreach (var item in RecipeRows(result, "pending")) newer.Add(Convert.ToString(item));
+        if (newer.Count > 0) summary += " · 可下载：" + String.Join("、", newer.ToArray());
+        managerRecipeStatus.Text = summary;
+        FitCurrentPage();
+        if (install) Append(summary);
     }
 
     async Task ShowManagerNotes() {

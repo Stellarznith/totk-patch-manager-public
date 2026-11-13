@@ -9,13 +9,15 @@ from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/manager"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import workspace
 import core
 import manager_mods as mods
 
 
 class ModCenterTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="TotK MOD 验收 ")
+        self.temp = workspace.directory("TotK MOD 验收 ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.game = self.root / "游戏 副本"

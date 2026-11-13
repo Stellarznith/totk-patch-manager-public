@@ -24,6 +24,8 @@ APP = Path(__file__).resolve().parent
 sys.path.insert(0,str(APP))
 import manager_install
 API = 'https://api.github.com/repos/valentderah/totk-pc-recomp'
+OWN = 'Stellarznith/totk-patch-manager-public'
+OWN_API = 'https://api.github.com/repos/' + OWN
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 CANCEL = None
 LOG = None
@@ -39,6 +41,9 @@ ICON_STYLES = ('white', 'stavaas', 'alerion')
 ICON_LABELS = {'white': 'Stellarznith', 'stavaas': 'Stavaas', 'alerion': 'Alerion'}
 PS5_ACTION_COMMON = 'UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs'
 PS5_ACTION_REVISION = 1
+# A personal backup is meant to be small enough to hand around; a video-sized mod tree is reported, never truncated.
+BACKUP_FILE_LIMIT = 64 * 1024 * 1024
+BACKUP_TOTAL_LIMIT = 512 * 1024 * 1024
 
 
 def ps5_action_backend():
@@ -289,18 +294,22 @@ def run(command, cwd=None, env=None):
         raise RuntimeError('步骤失败，退出码 %s；详细原因见上方日志，原游戏未改动。' % p.returncode)
 
 
-def merge_source(base, ours, upstream):
-    """Merge disjoint edits at base-line coordinates; conflicting edits never select a side silently.
+def merge_source_traced(base, ours, upstream):
+    """Merge disjoint edits at base-line coordinates, also reporting where every accepted edit landed.
 
     An insertion (i == j) and a replaced span (a < end) only conflict when the insertion lands strictly inside the
     span: at either end the two edits still write different lines of the base and both survive. Two insertions at one
     point conflict only in ordering, which the sort key settles: the extension's own lines go in front of the lines
     the official version added there. Two replaced spans conflict when they share any base line.
+
+    The trace exists because a recipe edit that no longer finds its anchor is not an error: it is an edit that quietly
+    stops applying while the build goes on. Preflight needs the base lines each side touched so it can say which
+    extension edit the upstream moved away from, instead of only "the merge produced text".
     """
     if ours == base or ours == upstream:
-        return upstream
+        return upstream, []
     if upstream == base:
-        return ours
+        return ours, []
     b = base.splitlines(keepends=True)
     def changes(value, side):
         lines = value.splitlines(keepends=True)
@@ -335,11 +344,17 @@ def merge_source(base, ours, upstream):
                 break
         if keep:
             accepted.append(edit)
-    result, cursor = [], 0
-    for i, j, lines, _ in accepted:
+    result, cursor, trace = [], 0, []
+    for i, j, lines, side in accepted:
         result.extend(b[cursor:i]); result.extend(lines); cursor = j
+        if side == 0 and lines:
+            trace.append(dict(base_line=i + 1, base_end=j, lines=len(lines)))
     result.extend(b[cursor:])
-    return ''.join(result)
+    return ''.join(result), trace
+
+
+def merge_source(base, ours, upstream):
+    return merge_source_traced(base, ours, upstream)[0]
 
 
 def ini_values(path):
@@ -579,38 +594,410 @@ def toolkit(cache, info, asset):
     return kit, source
 
 
+def recipe_manifest(archive):
+    """Identity carried by the recipe archive itself: the upstream basis it was authored against."""
+    with zipfile.ZipFile(archive) as z:
+        metadata = json.loads(z.read('manifest.json'))
+    return dict(basis=str(metadata.get('basis', '')), commit=str(metadata.get('source_commit', '')),
+                files=metadata.get('files', {}))
+
+
+def recipe_candidates():
+    """Every recipe shipped beside the manager or fetched later; a leftover archive is a candidate, never an assumption."""
+    result = []
+    for path in sorted(APP.glob('recipe*.zip')) + sorted((APP / 'cache' / 'recipes').glob('*.zip')):
+        if not usable_archive(path):
+            continue
+        try:
+            item = recipe_manifest(path)
+        except (KeyError, ValueError, zipfile.BadZipFile):
+            continue
+        item['path'] = path
+        result.append(item)
+    return result
+
+
+def upstream_identity(source):
+    """Version and commit read from the upstream tree that will actually be merged."""
+    version_file = Path(source) / 'VERSION'
+    version = version_file.read_text(encoding='utf-8').strip().split('+')[0] if version_file.is_file() else ''
+    verified = read_json(Path(source).parent / 'verified.json', {})
+    commit = str(verified.get('commit', ''))
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        named = re.search(r'totk-pc-recomp-([0-9a-f]{40})', Path(source).name)
+        commit = named[1] if named else ''
+    return version, commit
+
+
+def version_tuple(text):
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', str(text or '').strip())
+    return tuple(int(x) for x in match.groups()) if match else None
+
+
+def catalog_paths():
+    """Where adapters live: beside the manager, plus every adapter the updater verified and kept in the cache."""
+    return [APP] + sorted(p for p in (APP / 'cache' / 'recipes').glob('*') if p.is_dir())
+
+
+def supported_versions():
+    """Upstream bases this manager can author, oldest first; a leftover archive is not counted."""
+    bases = {item['basis'] for item in recipe_candidates()}
+    return sorted((key, text) for text in bases if (key := version_tuple(text)))
+
+
+def recipe_catalog_urls():
+    return OWN_API + '/releases/latest'
+
+
+def recipe_catalog(cache=None):
+    """Adapters published by this project, so a new official basis does not need a whole manager release.
+
+    The catalog rides the manager's own release as an ordinary asset, so it uses the same verified channel the updater
+    already trusts: the digest comes from the GitHub API record, every adapter it names carries its own SHA-256, and a
+    downloaded archive only becomes usable once its manifest parses — which recipe_candidates() re-checks when the
+    adapter is finally selected.
+    """
+    target = Path(cache or APP / 'cache') / 'recipes' / 'recipe-catalog.json'
+    try:
+        info = get_json(recipe_catalog_urls())
+    except (RuntimeError, ValueError) as error:
+        # An offline player keeps the adapters already beside the manager; a missing catalog is not an install blocker.
+        emit('无法获取在线适配配方清单，继续使用本机配方：' + str(error))
+        return read_json(target, {}).get('recipes', []) if isinstance(read_json(target, {}), dict) else []
+    tag = str(info.get('tag_name', ''))
+    assets = [a for a in info.get('assets', []) if isinstance(a, dict) and a.get('name') == 'recipe-catalog.json']
+    if not assets:
+        emit('在线适配配方清单尚未发布，继续使用本机配方。')
+        return []
+    asset, = assets
+    if asset.get('state') != 'uploaded':
+        raise ValueError('在线适配配方清单尚未上传完成，请稍后重试。')
+    url = asset.get('browser_download_url') or ''
+    expected = asset.get('digest') or ''
+    size = asset.get('size')
+    if (url != 'https://github.com/' + OWN + '/releases/download/' + tag + '/recipe-catalog.json'
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', expected) or type(size) is not int or not 0 < size <= 2 ** 20):
+        raise ValueError('在线适配配方清单缺少有效的下载地址、大小或 SHA-256。')
+    download(url, target, expected[7:], size)
+    data = read_json(target, {})
+    rows = data.get('recipes') if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError('在线适配配方清单格式无效。')
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        basis, name, sha, count = row.get('basis'), row.get('asset'), row.get('sha256'), row.get('size')
+        if (not isinstance(basis, str) or version_tuple(basis) is None or not isinstance(name, str)
+                or not re.fullmatch(r'recipe-[0-9][0-9A-Za-z.\-]*\.zip', name) or not isinstance(sha, str)
+                or not re.fullmatch(r'[0-9a-f]{64}', sha) or type(count) is not int or not 0 < count <= 64 * 1024 * 1024):
+            continue
+        result.append(dict(basis=basis, asset=name, sha256=sha, size=count,
+                           url='https://github.com/' + OWN + '/releases/download/' + tag + '/' + name))
+    return sorted(result, key=lambda row: version_tuple(row['basis']))
+
+
+def sync_recipes(cache=None):
+    """Fetch the adapters this manager does not already carry, verifying each one before it can be selected."""
+    rows = recipe_catalog(cache)
+    if not rows:
+        return []
+    target = Path(cache or APP / 'cache') / 'recipes'
+    target.mkdir(parents=True, exist_ok=True)
+    have = {}
+    for item in recipe_candidates():
+        if item['basis']:
+            have[item['basis']] = item['path']
+    added, kept = [], []
+    for row in rows:
+        path = target / row['asset']
+        if path.is_file() and digest(path) == row['sha256']:
+            kept.append(row['basis'])
+            continue
+        if have.get(row['basis']) and digest(have[row['basis']]) == row['sha256']:
+            kept.append(row['basis'])
+            continue
+        download(row['url'], path, row['sha256'], row['size'])
+        try:
+            recipe_manifest(path)
+        except (KeyError, ValueError, zipfile.BadZipFile) as error:
+            path.unlink(missing_ok=True)
+            raise ValueError('在线适配配方 %s 无法读取清单：%s' % (row['basis'], error)) from error
+        added.append(row['basis'])
+    emit('适配配方已更新：新增 %d 份，已有 %d 份。' % (len(added), len(kept)))
+    return added
+
+
+def select_recipe(source, adaptive=True):
+    """Pick the adapter that will author this upstream tree's extension source.
+
+    A version number is a label, not a proof: an official release can re-tag the same code, and a development build
+    carries the version it was cut from. Matching is therefore two-tiered. An adapter whose basis equals the tree's
+    VERSION wins; when the commit also matches it is reported as verified. With no exact basis, the nearest *older*
+    verified basis is used as a starting point and its edits are re-located by context — the merge itself decides
+    whether the adapter really fits, and it refuses rather than guessing when an edit has no unique home.
+    """
+    version, commit = upstream_identity(source)
+    candidates = recipe_candidates()
+    if not candidates:
+        raise ValueError('管理器缺少适配配方，请完整解压安装包；未覆盖任何游戏文件。')
+    if not version:
+        raise ValueError('上游源码缺少 VERSION，无法确认适配配方；未覆盖任何游戏文件。')
+    wanted = version_tuple(version)
+    exact = [c for c in candidates if c['basis'] == version]
+    pinned = [c for c in exact if c['commit'] and commit and c['commit'] == commit]
+    if len(pinned) == 1:
+        chosen, mode = pinned[0], 'verified'
+    elif len(exact) == 1:
+        chosen, mode = exact[0], 'basis'
+    elif len(exact) > 1:
+        raise ValueError('管理器内有多份配方同时适配上游 %s，无法确定使用哪一份；未覆盖任何游戏文件。' % version)
+    else:
+        if not adaptive or wanted is None:
+            known = '、'.join(sorted({c['basis'] for c in candidates if c['basis']})) or '无'
+            raise ValueError('当前上游版本 %s 没有对应的适配配方（本机配方适配：%s）。'
+                             '可使用「一键适配」按当前版本安全适配，或改用「更新上游并重编」升级到官方最新正式版；未覆盖任何游戏文件。'
+                             % (version, known))
+        older = [c for c in candidates if version_tuple(c['basis']) and version_tuple(c['basis']) < wanted]
+        if not older:
+            known = '、'.join(sorted({c['basis'] for c in candidates if c['basis']})) or '无'
+            raise ValueError('当前上游版本 %s 低于本机所有适配配方（本机配方适配：%s），无法安全适配。'
+                             '使用「更新上游并重编」即可升级到官方最新正式版后再安装扩展；未覆盖任何游戏文件。'
+                             % (version, known))
+        chosen, mode = max(older, key=lambda c: version_tuple(c['basis'])), 'rebased'
+    chosen = dict(chosen)
+    chosen['version'], chosen['upstream_commit'], chosen['mode'] = version, commit, mode
+    chosen['verified'] = mode == 'verified'
+    return chosen
+
+
+def try_sync(cache):
+    """Best-effort adapter refresh before an adaptive install; an offline player must still be able to build."""
+    try:
+        return sync_recipes(cache)
+    except (RuntimeError, ValueError, OSError) as error:
+        emit('在线适配配方暂时不可用，继续使用本机配方：' + str(error))
+        return []
+
+
 def recipe_archive(version=None):
-    previous = APP / 'recipe-0.3.13.zip'
-    if version and previous.is_file() and re.fullmatch(r'\d+\.\d+\.\d+', version) and tuple(map(int, version.split('.'))) < (0, 4, 0):
-        return previous
+    """The recipe whose basis equals this upstream version; a leftover archive for another version is not it."""
+    if version:
+        for item in recipe_candidates():
+            if item['basis'] == version:
+                return item['path']
     return APP / 'recipe.zip'
 
 
-def recipe(source, destination, ps5, graphics):
-    version_file = source / 'VERSION'
-    version = version_file.read_text(encoding='utf-8').strip().split('+')[0] if version_file.is_file() else None
-    with zipfile.ZipFile(recipe_archive(version)) as z:
-        metadata = json.loads(z.read('manifest.json'))
-        for original in (source/'runtime').rglob('*'):
-            if not original.is_file():continue
-            name=original.relative_to(source/'runtime').as_posix()
-            if name in metadata['files']:continue
-            output=inside(destination,name)
-            if not output.exists() or output.read_bytes()!=original.read_bytes():
-                output.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,output)
-        for name, item in metadata['files'].items():
+def recipe_merge(source, entry):
+    """Run every recipe edit in memory; nothing is written until all of them succeeded."""
+    merged, problems = {}, []
+    with zipfile.ZipFile(entry['path']) as z:
+        for name, item in sorted(entry['files'].items()):
             cancelled()
-            current = source / 'runtime' / name
-            base, modified = z.read(item['base']).decode('utf-8'), z.read(item['modified']).decode('utf-8')
+            base = z.read(item['base']).decode('utf-8')
+            modified = z.read(item['modified']).decode('utf-8')
+            current = Path(source) / 'runtime' / name
             text = current.read_text(encoding='utf-8') if current.exists() else ''
             try:
-                merged = merge_source(base, modified, text)
-            except ValueError as e:
-                raise ValueError(name + ': ' + str(e)) from e
-            output = inside(destination, name)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            encoded=merged.encode('utf-8')
-            if not output.is_file() or output.read_bytes()!=encoded:output.write_bytes(encoded)
+                result, trace = merge_source_traced(base, modified, text)
+            except ValueError as error:
+                problems.append(name + '：' + str(error))
+                continue
+            lost = lost_edits(base, modified, result)
+            if lost:
+                problems.append('%s：配方有 %d 处改动在当前上游没有落地（配方第 %s 行附近），扩展功能会静默缺失；需更新适配配方。'
+                                % (name, len(lost), '、'.join(str(n) for n in lost[:4])))
+                continue
+            merged[name] = result
+    return merged, problems
+
+
+def lost_edits(base, ours, result):
+    """Recipe edits that did not survive into the merged text, reported at their recipe-side line.
+
+    A merge that raises is loud. A merge that succeeds while an edit no longer matches anything is silent: the build
+    finishes, the player installs it, and the feature the edit provided is simply absent. Preflight has to catch that
+    case too, so every block the recipe introduced is looked for in the merged text.
+    """
+    b, lines = base.splitlines(), ours.splitlines()
+    present = result.splitlines()
+    missing = []
+    for tag, i, j, x, y in difflib.SequenceMatcher(None, b, lines, autojunk=False).get_opcodes():
+        block = lines[x:y]
+        if tag == 'equal' or not block:
+            continue
+        if not any(present[k:k + len(block)] == block for k in range(len(present) - len(block) + 1)):
+            missing.append(x + 1)
+    return missing
+
+
+def recipe_preflight(source, entry):
+    """Dry-run every recipe edit before anything is compiled, installed or overwritten."""
+    merged, problems = recipe_merge(source, entry)
+    return problems, len(merged)
+
+
+def anchors(text):
+    """Normalized text of every line, so an anchor survives reformatting of the upstream source."""
+    return [' '.join(line.split()) for line in text.splitlines()]
+
+
+def locate(block, haystack, k=3):
+    """Occurrences of a block of normalized lines in the upstream file, with `k` lines of context.
+
+    A line number is not an identity: the official version inserts and removes lines above the code an extension
+    edits, so the same edit lives at a different number in every release. The surrounding text is the identity, and
+    the wider the context that matches exactly once, the stronger the claim that this is the same code.
+    """
+    if not block:
+        return []
+    size = len(block)
+    hits = []
+    for start in range(len(haystack) - size + 1):
+        if haystack[start:start + size] == block:
+            hits.append(start)
+    return hits
+
+
+def carved(original, block, replacement):
+    """The edit's own lines, but with upstream's formatting kept on the lines the edit did not touch.
+
+    An opcode carries a few untouched lines along with the changed ones. Writing those back verbatim would undo an
+    upstream re-indentation or comment reflow inside the edited span: the build stays correct, but the file becomes a
+    mix of two styles, and every later upstream diff on that span turns into noise. Lines the edit did change still come
+    from the edit; lines it only carried are taken from the upstream text that now stands at that place.
+    """
+    result = []
+    for tag, i1, i2, x1, x2 in difflib.SequenceMatcher(None, original, block, autojunk=False).get_opcodes():
+        result.extend(replacement[i1:i2] if tag == 'equal' else block[x1:x2])
+    return result
+
+
+def rebase_edits(base, ours, upstream, minimum=1):
+    """Re-apply the extension's edits onto a newer upstream by matching content, not line numbers.
+
+    A three-way merge works in base coordinates, so an upstream that only shifts code never conflicts with it. What
+    does conflict is real: the official version rewrote the very lines an edit touches. Some of those rewrites are
+    cosmetic (re-indentation, a comment reflow, a tab), and those are recoverable because the *normalized* content of
+    the edited span still exists at exactly one place upstream. Anything else is a genuine semantic collision and has
+    to stop the install: guessing which side to keep is how an extension silently disappears.
+
+    Every relocated edit is verified afterwards by lost_edits(), so "success" here means the extension's own lines are
+    provably present in the result.
+    """
+    b, lines = base.splitlines(keepends=True), ours.splitlines(keepends=True)
+    up = upstream.splitlines(keepends=True)
+    norm_base, norm_up = anchors(base), anchors(upstream)
+    moved = []
+    for tag, i, j, x, y in difflib.SequenceMatcher(None, b, lines, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            continue
+        block = lines[x:y]
+        span = norm_base[i:j]
+        if span:
+            points = [start for start in range(len(norm_up) - len(span) + 1) if norm_up[start:start + len(span)] == span]
+            if len(points) != 1:
+                raise ValueError('扩展改写的第 %d-%d 行在上游%s，需更新适配配方。'
+                                 % (i + 1, j, '出现多次、无法定位' if points else '已被官方改写'))
+            start = points[0]
+            moved.append((start, start + len(span), carved(b[i:j], block, up[start:start + len(span)])))
+            continue
+        # A pure insertion has no span of its own; its neighbors are what identify the place it belongs to.
+        left, right = norm_base[:i], norm_base[i:]
+        placed = None
+        for take_left in range(min(3, len(left)), 0, -1):
+            for take_right in range(min(3, len(right)), -1, -1):
+                if take_left + take_right < minimum:
+                    continue
+                before, after = left[len(left) - take_left:], right[:take_right]
+                hits = [at + take_left for at in range(len(norm_up) - take_left - take_right + 1)
+                        if norm_up[at:at + take_left] == before
+                        and norm_up[at + take_left:at + take_left + take_right] == after]
+                if len(hits) == 1:
+                    placed = hits[0]
+                    break
+            if placed is not None:
+                break
+        if placed is None:
+            raise ValueError('扩展在第 %d 行插入的代码找不到唯一插入点（上下文已变化），需更新适配配方。' % (i + 1))
+        moved.append((placed, placed, block))
+    # Two edits landing on one upstream region would overwrite each other; that is a collision, not an adaptation.
+    ordered = sorted(moved)
+    for (s1, e1, _), (s2, e2, _) in zip(ordered, ordered[1:]):
+        if s2 < e1 and not (s1 == e1 == s2):
+            raise ValueError('扩展有两处改动落在上游同一段代码上，需更新适配配方。')
+    result = list(up)
+    for start, end, block in reversed(ordered):
+        result[start:end] = block
+    text = ''.join(result)
+    absent = lost_edits(base, ours, text)
+    if absent:
+        raise ValueError('扩展有 %d 处改动没有落到合并结果里（配方第 %s 行附近）。' % (len(absent), '、'.join(str(n) for n in absent[:4])))
+    return text, len(moved)
+
+
+def recipe_preflight_adaptive(source, entry):
+    """Preflight that first tries exact three-way merge, then a rebased merge, and reports which one held."""
+    merged, problems, rebased = {}, [], []
+    with zipfile.ZipFile(entry['path']) as z:
+        for name, item in sorted(entry['files'].items()):
+            cancelled()
+            base = z.read(item['base']).decode('utf-8')
+            modified = z.read(item['modified']).decode('utf-8')
+            current = Path(source) / 'runtime' / name
+            text = current.read_text(encoding='utf-8') if current.exists() else ''
+            try:
+                result = merge_source(base, modified, text)
+            except ValueError as error:
+                try:
+                    result, count = rebase_edits(base, modified, text)
+                except ValueError as second:
+                    problems.append('%s：%s' % (name, second))
+                    continue
+                rebased.append('%s（%d 处编辑按上下文重新定位）' % (name, count))
+            merged[name] = result
+    return merged, problems, rebased
+
+
+def recipe(source, destination, ps5, graphics):
+    """Plan and apply in one step, for callers that have nothing to preflight separately."""
+    entry, merged, rebased = recipe_plan(source)
+    recipe_apply(source, destination, merged, entry, rebased, ps5, graphics)
+
+
+def recipe_plan(source):
+    """Decide and dry-run every recipe edit; nothing outside this process is touched."""
+    entry = select_recipe(source)
+    merged, problems, rebased = recipe_preflight_adaptive(source, entry)
+    if problems:
+        raise ValueError('适配配方与当前上游不兼容，已在改动任何游戏文件前停止（共 %d 处；配方适配上游 %s，当前上游 %s）：\n%s'
+                         % (len(problems), entry['basis'], entry['version'], '\n'.join(problems)))
+    if entry['mode'] == 'rebased':
+        emit('本机没有 %s 专用配方，已按上下文把 %s 配方的编辑重新定位到当前上游；%d 处编辑全部落地，尚未改动游戏文件。'
+             % (entry['version'], entry['basis'], len(rebased)))
+    else:
+        emit('适配配方预检通过：%d 个文件可自动合并（配方适配上游 %s）。' % (len(merged), entry['basis']))
+    return entry, merged, rebased
+
+
+def recipe_apply(source, destination, merged, entry, rebased, ps5, graphics):
+    """Write an already verified merge result, plus every file the extension adds outright."""
+    with zipfile.ZipFile(entry['path']) as z:
+        metadata = json.loads(z.read('manifest.json'))
+    for original in (source/'runtime').rglob('*'):
+        if not original.is_file():continue
+        name=original.relative_to(source/'runtime').as_posix()
+        if name in metadata['files']:continue
+        output=inside(destination,name)
+        if not output.exists() or output.read_bytes()!=original.read_bytes():
+            output.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,output)
+    for name in sorted(merged):
+        cancelled()
+        output = inside(destination, name)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        encoded=merged[name].encode('utf-8')
+        if not output.is_file() or output.read_bytes()!=encoded:output.write_bytes(encoded)
     p = destination / 'cfg.h'
     text = p.read_text(encoding='utf-8')
     text = text.replace('#define TOTK_PATCH_FEATURES 3', '#define TOTK_PATCH_FEATURES ' + str(int(ps5) + 2 * int(graphics)))
@@ -619,8 +1006,22 @@ def recipe(source, destination, ps5, graphics):
 
 
 def recipe_id(version=None):
+    """Stable identity of the recipe this manager applies for an upstream version.
+
+    A leftover archive never enters the hash: a player who keeps an old recipe beside a new manager must not get a
+    different "same version" fingerprint from a player with a clean install, because repair, health and the prepared
+    cache would then disagree about what the installed build was made from.
+    """
+    if version:
+        exact = [item['path'] for item in recipe_candidates() if item['basis'] == version]
+        if len(exact) == 1:
+            archive = exact[0]
+        else:
+            return 'missing-recipe-' + version
+    else:
+        archive = APP / 'recipe.zip'
     h=hashlib.sha256()
-    with zipfile.ZipFile(recipe_archive(version)) as z:
+    with zipfile.ZipFile(archive) as z:
         for name in sorted(z.namelist()):
             h.update(name.encode()); h.update(z.read(name))
     return h.hexdigest()
@@ -635,7 +1036,7 @@ def assets_id():
     return h.hexdigest()
 
 
-def prepared_key(ctx,info,cpu,ps5,graphics,official):
+def prepared_key(ctx,info,cpu,ps5,graphics,official,entry=None):
     image=Path(ctx['romfs'])/'romfs.bin';stat=image.stat()
     index=Path(ctx['game']).parent/'romfs-index.bin'
     identity=dict(version=info['tag_name'],main=digest(Path(ctx['exefs'])/'main'),cpu=cpu,
@@ -646,6 +1047,11 @@ def prepared_key(ctx,info,cpu,ps5,graphics,official):
                   assets=assets_id() if not official else '')
     if ps5 and not official:
         identity['ps5_action_revision'] = PS5_ACTION_REVISION
+    if entry:
+        # A rebuild without an exact adapter depends on which adapter was rebased and onto which upstream commit;
+        # without this, two different upstream trees would share one cache entry and reuse the wrong binary.
+        identity.update(recipe_basis=entry.get('basis',''),recipe_mode=entry.get('mode',''),
+                        recipe_commit=entry.get('upstream_commit',''),recipe_archive=digest(entry['path']))
     return hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
 
 
@@ -1094,8 +1500,43 @@ def backup_personal(ctx):
             for p in (Path(ctx['profile']) / name).rglob('*'):
                 if p.is_file() and not p.is_symlink():
                     z.write(p, 'profile/' + p.relative_to(ctx['profile']).as_posix())
-    emit('存档与配置已备份：' + str(target))
+    kept, skipped = backup_extension(ctx, target)
+    emit('存档与配置已备份：' + str(target)
+         + ('；同时收纳了 %d 个模组与设置文件' % kept if kept else '')
+         + ('；%d 个过大或位于链接路径的模组文件未收纳' % skipped if skipped else ''))
     return target
+
+
+def backup_extension(ctx, target):
+    """Mods and per-game settings, which a source rebuild does not otherwise preserve.
+
+    Saves are protected by the install journal, but a mods folder and the extension settings live in the game folder
+    and are replaced or regenerated by a rebuild. They are small text/asset trees in practice, so they get their own
+    archive with a per-file and a total ceiling: a giant video pack is reported, never silently truncated.
+    """
+    root = Path(ctx['game']).parent
+    limit_file, limit_total = BACKUP_FILE_LIMIT, BACKUP_TOTAL_LIMIT
+    kept = skipped = total = 0
+    with zipfile.ZipFile(target / '模组与设置.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+        for folder in ('mods', ICON_FOLDER, ICON_FOLDER + '-stavaas', ICON_FOLDER + '-alerion'):
+            base = root / folder
+            if not base.is_dir() or base.is_symlink():
+                continue
+            for p in base.rglob('*'):
+                if not p.is_file() or p.is_symlink():
+                    continue
+                size = p.stat().st_size
+                if size > limit_file or total + size > limit_total:
+                    skipped += 1
+                    continue
+                z.write(p, p.relative_to(root).as_posix())
+                kept += 1
+                total += size
+        for name in ('settings.json', 'active.json', 'rollback.json'):
+            p = home(ctx) / name
+            if p.is_file() and p.stat().st_size <= 4 * 1024 * 1024:
+                z.write(p, 'manager/' + name)
+    return kept, skipped
 
 
 def cleanup_candidates(ctx):
@@ -1129,7 +1570,7 @@ def build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False)
         finally:lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
 
 
-def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False):
+def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False, entry=None):
     ensure_idle(ctx)
     if not ps5 and not graphics and not official:
         raise ValueError('请至少选择一个扩展组件。')
@@ -1146,6 +1587,13 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
     write_json(cache/'release-metadata'/(info['tag_name']+'.json'),info)
     kit, source = toolkit(cache, info, asset)
     tag = info['tag_name'].removeprefix('v')
+    # The source merge is decided here, before a compiler, a CPU probe or a game file is touched: an upstream this
+    # manager cannot adapt has to be refused while the previous install is still untouched and usable.
+    prepared = None
+    entry = None
+    if not official:
+        entry, merged, rebased = recipe_plan(source)
+        prepared = merged
     source_id = read_json(source.parent / 'verified.json')['commit']
     identity = hashlib.sha256((digest(Path(ctx['exefs']) / 'main') + source_id).encode()).hexdigest()
     key = identity[:16]
@@ -1162,7 +1610,7 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
         raise ValueError('CPU 未达到官方当前版本的要求，原游戏未改动。')
     cpu='v3' if host.get('x86_64_v3') else 'v2'
     emit('沿用官方硬件检测，构建 CPU 档位：'+cpu)
-    ready_key=prepared_key(ctx,info,cpu,ps5,graphics,official)
+    ready_key=prepared_key(ctx,info,cpu,ps5,graphics,official,entry)
     package=load_prepared(cache,ready_key)
     if package:
         emit('复用已完成并通过校验的组件包，跳过编译、界面资源和着色器准备。')
@@ -1179,7 +1627,7 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
                 target=runtime/p.relative_to(source/'runtime');target.parent.mkdir(parents=True,exist_ok=True)
                 if not target.exists() or target.read_bytes()!=p.read_bytes():shutil.copyfile(p,target)
         emit('使用未修改的官方运行时源码恢复，不接入本地 PS5 或图形扩展。')
-    else:recipe(source, runtime, ps5, graphics)
+    else:recipe_apply(source, runtime, prepared, entry, [], ps5, graphics)
     main_sha = digest(Path(ctx['exefs']) / 'main')
     candidates = []
     for p in (source / 'tools/data').glob('expected-v*.json'):
@@ -1392,7 +1840,7 @@ def mod_game_version(ctx):
 
 def main(request):
     # Independent manager copies must not concurrently activate or repair the same game.
-    mutating={'apply','update','repair','rebuild-current','prewarm-shaders','rollback','disable','icons','icons-disable','backup','launch','launch-safe','launch-sdr','official','restore-official','language','reset-render-cache','cleanup-owned'}
+    mutating={'apply','update','repair','rebuild-current','refresh-recipes','prewarm-shaders','rollback','disable','icons','icons-disable','backup','launch','launch-safe','launch-sdr','official','restore-official','language','reset-render-cache','cleanup-owned'}
     action = request['action']
     mods_write = action.startswith('mods-') and action not in {
         'mods-scan', 'mods-preview', 'mods-profile-preview', 'mods-profile-export'}
@@ -1447,6 +1895,21 @@ def dispatch(request):
             emit('更新包已校验，退出管理器后开始安装。',result=dict(version=info['version']))
         else:
             emit('GitHub 管理器发行版：'+info['version'],result=info)
+        return
+    if action in ('recipe-check','recipe-sync'):
+        # A third, independent update channel: adapters can gain a new upstream basis without a manager release.
+        local = [dict(basis=c['basis'], commit=c['commit'], file=c['path'].name) for c in recipe_candidates()]
+        if action == 'recipe-sync':
+            added = sync_recipes(cache)
+            local = [dict(basis=c['basis'], commit=c['commit'], file=c['path'].name) for c in recipe_candidates()]
+            emit('适配配方已更新：新增 %d 份。' % len(added), result=dict(added=added, local=local))
+            return
+        online = recipe_catalog(cache)
+        covered = {c['basis'] for c in recipe_candidates()}
+        pending = [row['basis'] for row in online if row['basis'] not in covered]
+        emit('本机适配配方：%s。' % ('、'.join(c['basis'] for c in local) or '无')
+             + ('可获取的新版本：%s。' % '、'.join(pending) if pending else '在线没有更新的适配配方。'),
+             result=dict(local=local, online=[dict(basis=r['basis'], size=r['size']) for r in online], pending=pending))
         return
     ctx = context(request['game'])
     if action.startswith('mods-'):
@@ -1506,7 +1969,11 @@ def dispatch(request):
         state=active(ctx)
         selected=state if action=='repair' and state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) else request
         install_prebuilt(ctx,selected.get('ps5',True),selected.get('graphics',True),cache,repair=action=='repair')
-    elif action in ['update','rebuild-current']:
+    elif action in ['update','rebuild-current','refresh-recipes']:
+        if action != 'refresh-recipes':
+            # Adapters are refreshed before the build so a newly published one is used instead of rebasing an old one.
+            # Offline players fall through to whatever adapters are already on disk.
+            try_sync(cache)
         tag = None if action == 'update' else request.get('version') or ctx['version'].split('+')[0]
         if not re.fullmatch(r'\d+\.\d+\.\d+', tag or '') and tag is not None:
             raise ValueError('当前程序版本无法可靠识别，请选择手动更新到官方最新正式版。')

@@ -111,7 +111,7 @@ public partial class Manager : Form {
     }
     async Task<Dictionary<string,object>> Execute(string action,Dictionary<string,object> extra=null,bool background=false) {
         if(busy&&!background)return null;
-        if(action!="check"&&action!="discover"&&action!="manager-check"&&action!="manager-update"&&selected==""){Append("请先选择游戏。");UpdateTaskStatus("请先选择游戏程序", Theme.Warning);return null;}
+        if(action!="check"&&action!="discover"&&action!="manager-check"&&action!="manager-update"&&action!="recipe-check"&&action!="recipe-sync"&&selected==""){Append("请先选择游戏。");UpdateTaskStatus("请先选择游戏程序", Theme.Warning);return null;}
         if (!background) SetBusy(true);
         Dictionary<string,object> result=null;bool success=false;string failure="";
         try {
@@ -163,11 +163,26 @@ public partial class Manager : Form {
             UpdateTaskStatus(detail, Theme.Warning);
             if (action != "inspect" && action != "check" && action != "discover" && action != "manager-check") {
                 SetLogOpen(true);
-                if (!selftest) MessageBox.Show(this, detail, action.StartsWith("launch") ? "启动未完成" : "操作未完成",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!selftest) {
+                    if (RecipeBlocked(detail) && action != "update" && action != "rebuild-current" && selected != "") {
+                        var choice = MessageBox.Show(this, detail
+                            + "\n\n现在就升级上游到官方最新正式版，再重新编译扩展吗？\n"
+                            + "不想升级可以选「否」：游戏保持现在的可用状态，不会擅自升级或降级。",
+                            "需要更新适配配方", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+                        if (choice == DialogResult.Yes) await Build("update");
+                    } else {
+                        MessageBox.Show(this, detail, action.StartsWith("launch") ? "启动未完成" : "操作未完成",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
             }
         }
         return success ? result??new Dictionary<string,object>() : null;
+    }
+    // A refusal to merge is a decision, not a crash: offer the one action that resolves it instead of a bare error.
+    static bool RecipeBlocked(string detail) {
+        return detail.Contains("适配配方") && (detail.Contains("需更新适配配方") || detail.Contains("不兼容")
+            || detail.Contains("没有对应的适配配方") || detail.Contains("无法安全适配") || detail.Contains("配方适配上游"));
     }
     async void Choose(object sender,EventArgs e) {using(var d=new OpenFileDialog{Title="选择现有游戏的 totk.exe",Filter="游戏程序|totk.exe|应用程序|*.exe"})if(d.ShowDialog(this)==DialogResult.OK){selected=d.FileName;UpdatePath();Save();await Inspect();}}
     async void Find(object sender,EventArgs e) {
