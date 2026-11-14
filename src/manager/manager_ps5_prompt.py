@@ -292,6 +292,10 @@ def repair(output, folders, rows, blob, base, cancelled):
         return 0
 
     def original(path):
+        if path not in rows:
+            raise ValueError(
+                f'当前本地游戏 RomFS 缺少 {path}（内置 PS5 交互校准仅适配 1.4.3 游戏资源），无法校准 PS5 交互按键；原游戏未改动。'
+            )
         at, size = rows[path]
         if not 0 < size <= 128 * 1024**2:
             raise ValueError('本地 PS5 交互提示原资源大小无效。')

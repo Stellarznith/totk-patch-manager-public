@@ -1,5 +1,13 @@
 # 更新记录 · Changelog
 
+## 1.3.4
+
+- 重建 `0.4.0` 全部 6 个随包预编译程序变体（`v2`/`v3` × 功能档位 `1`/`2`/`3`）并同步 `prebuilt/manifest.json` 的 `recipe_id`（`a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211`）与 `manager_version`（`1.3.4`）；建立经过哈希校验的历史预编译成品与适配配方精确配对机制（不关闭完整性检测），老用户从 `v1.2.8`–`v1.3.3` 在线升级并同步新版配方后，旧随包成品继续严格绑定各自验证配方，新版配方用于兼容重编流程；并在 `tools/build_manager.py` 新增构建时全量一致性校验。
+- 彻底修复 `SteamDeck=1` / `SteamOS=1` 环境下 `--probe-cfg` 失败：在 `main.c` 调用 `mem_init()` 缓存设备档位之前就固定 `--probe-cfg` 使用 `desktop` 档位；同时修复管理器 `launch_env(probe=True)` 处理混合大小写 `SteamDeck` 环境变量时可能触发的 `KeyError`，正常游戏启动仍保持原有 Steam Deck 档位不变。
+- 修复「下载可用适配配方」后重编或校验报「有多份配方同时适配上游」的问题：`select_recipe()` 先按配方归档内容去重，在线缓存比旧随包配方更新时优先选用在线缓存，真存在冲突时列出冲突文件名。
+- 修复非 1.4.3 游戏资源（如 1.2.1）或缺失 1.4.3 交互资源的 RomFS 勾选「安装 PS5 图标与 USB 触觉支持」时裸报 `'UI/LayoutArchive/Common.Product.140.Nin_NX_NVN.blarc.zs'` 的问题，在校准、释放资源与重编译前置阶段拦截并给出清晰中文说明，不再写入不完整覆盖目录。
+- 修复用户仅单独运行轻量更新包或孤立复制 `王国之泪补丁管理器.exe`（缺少 `python\`、`python314.zip` 或 `core.py`）时启动连续弹出「系统找不到指定的文件」的问题，前置检测随包运行环境并单次提示完整解压说明。
+
 ## 1.3.3
 
 - Fixed probe-cfg failing (FAIL cfg: cfg_value returns the table default) when a launcher or handheld tool injects SteamDeck=1 / SteamOS=1: the Steam Deck device profile deliberately overrides six table defaults, and the probe now runs with the desktop profile instead (cfg_probe.c).

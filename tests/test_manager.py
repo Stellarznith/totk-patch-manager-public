@@ -161,6 +161,34 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.object(m,'get_json',side_effect=AssertionError('unexpected network')), mock.patch.object(m,'download',side_effect=AssertionError('unexpected download')):
             self.assertIn('0.4.0', [c['basis'] for c in m.recipe_candidates()])
 
+    def test_duplicate_or_online_updated_recipes_do_not_raise_ambiguity(self):
+        # 1) 同内容配方（含时间戳不同的同内容副本）应自动去重，优先保留 APP/recipe.zip
+        self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nold\n')}, commit='1'*40)
+        shutil.move(m.APP/'recipe-0.4.0.zip', m.APP/'recipe.zip')
+        cache = m.APP/'cache'/'recipes'; cache.mkdir(parents=True)
+        shutil.copyfile(m.APP/'recipe.zip', cache/'recipe-0.4.0.zip')
+        source = self.upstream('0.4.0', {'cfg.c': 'a\n'})
+        m.write_json(source.parent/'verified.json', dict(commit='1'*40))
+        chosen = m.select_recipe(source)
+        self.assertEqual(chosen['path'], m.APP/'recipe.zip')
+        self.assertEqual(m.recipe_id(), m.recipe_id('0.4.0'))
+
+        # 2) 在线缓存 recipe-0.4.0.zip 内容更新时，应优先于随包旧 recipe.zip，且 recipe_id('0.4.0') 口径一致
+        updated = self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nnew\n')}, commit='1'*40)
+        shutil.move(updated, cache/'recipe-0.4.0.zip')
+        chosen = m.select_recipe(source)
+        self.assertEqual(chosen['path'], cache/'recipe-0.4.0.zip')
+        self.assertEqual(m.recipe_id('0.4.0'), m.recipe_archive_digest(cache/'recipe-0.4.0.zip'))
+        self.assertNotEqual(m.recipe_id(), m.recipe_id('0.4.0'))
+
+        # 3) 安装目录自身存在两份不同内容的同 basis 配方时，仍应拒绝并列出文件名
+        extra = self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nconflict\n')}, commit='1'*40)
+        self.assertTrue(extra.is_file())
+        with self.assertRaises(ValueError) as caught:
+            m.select_recipe(source)
+        self.assertIn('recipe.zip', str(caught.exception))
+        self.assertIn('recipe-0.4.0.zip', str(caught.exception))
+
     def test_repeat_install_keeps_the_previous_rollback_point(self):
         game,ctx=self.fixture();before=game.read_bytes();h=m.home(ctx)
         staged=self.root/'prepared.exe';staged.write_bytes(b'MZ\0' + b'0.3.11\0')
@@ -470,6 +498,58 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(game.read_bytes(),exe);self.assertEqual((root/'totk.ini').read_bytes(),ini)
         self.assertNotEqual(game.read_bytes(),before);self.assertEqual(m.active(ctx)['install_method'],'prebuilt')
 
+    def test_prebuilt_entry_enforces_real_bundled_recipe_id(self):
+        game,ctx=self.fixture('0.4.0+abcdef')
+        (game.parent/'romfs-index.bin').write_bytes(struct.pack('<8sQQ',b'TOTKRFS1',0,24))
+        app=self.root/'real-bundled-app';payload=app/'prebuilt';payload.mkdir(parents=True)
+        recipe_file=self.recipe('0.4.0',{'cfg.c':('a\n','a\nb\n')})
+        shutil.move(recipe_file,app/'recipe.zip')
+        with zipfile.ZipFile(app/'assets.zip','w') as az:az.writestr('manifest.json','[]')
+        with mock.patch.object(m,'APP',app):
+            real_rid=m.recipe_id(); real_aid=m.assets_id()
+        exe=b'MZ\x00' + b'0.4.0\x00TOTK_EXTENSIONS_V1:3:END';checker=payload/'hostcheck.exe';checker.write_bytes(b'checker')
+        manifest=dict(schema=1,version='0.4.0',source_commit='1'*40,recipe_id=real_rid,assets_id=real_aid,
+                      hostcheck_sha256=m.digest(checker),games={'1.4.3':dict(exefs={'main':m.digest(Path(ctx['exefs'])/'main')},variants={})})
+        for label,data in [('common',{'SDL3.dll':b'dll'}),('v3-3',{'totk.exe':exe})]:
+            archive=payload/(label+'.zip')
+            with zipfile.ZipFile(archive,'w') as z:
+                for name,content in data.items():z.writestr(name,content)
+            item=dict(path=archive.name,sha256=m.digest(archive),files={name:hashlib.sha256(content).hexdigest() for name,content in data.items()})
+            if label=='common':manifest['games']['1.4.3']['common']=item
+            else:manifest['games']['1.4.3']['variants'][label]=item
+        m.write_json(payload/'manifest.json',manifest)
+        def hostcheck(args,**kwargs):
+            return mock.Mock(returncode=0,stdout=json.dumps(dict(x86_64_v2=True,x86_64_v3=True)))
+        with mock.patch.object(m,'APP',app),mock.patch.object(m,'assets',return_value=0),mock.patch.object(m,'run'),mock.patch.object(m.subprocess,'run',side_effect=hostcheck):
+            m.install_prebuilt(ctx,True,True,self.root/'cache')
+        self.assertEqual(game.read_bytes(),exe)
+        # 当 prebuilt/manifest.json 的 recipe_id 与随包 recipe.zip 不一致时，真实入口必须拦截并报错
+        manifest['recipe_id']='0'*64
+        m.write_json(payload/'manifest.json',manifest)
+        with mock.patch.object(m,'APP',app):
+            with self.assertRaisesRegex(ValueError,'随包程序与修复配方不匹配'):
+                m.install_prebuilt(ctx,True,True,self.root/'cache2')
+
+    def test_ps5_assets_compatibility_blocks_missing_143_resources_cleanly(self):
+        game,ctx=self.fixture('0.4.0+abcdef')
+        app=self.root/'ps5-compat-app';app.mkdir()
+        with zipfile.ZipFile(app/'assets.zip','w') as az:
+            az.writestr('0',zstd.compress(b'common',level=1))
+            az.writestr('manifest.json',json.dumps([dict(path=m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON,kind=2,entry='0',sha256=hashlib.sha256(b'common').hexdigest())]))
+        (game.parent/'romfs/index.json').write_text(json.dumps(dict(files=[dict(path='UI/LayoutArchive/Common.Product.120.Nin_NX_NVN.blarc.zs',offset=0,size=1)])))
+        with mock.patch.object(m,'APP',app),mock.patch.object(m,'mod_game_version',return_value='1.2.1'),mock.patch.object(m,'toolkit',side_effect=AssertionError('should stop before toolkit')):
+            with self.assertRaisesRegex(ValueError,r'1\.4\.3'):
+                m._build(ctx,True,True,dict(tag_name='v0.4.0'),dict(name='a.zip',digest='sha256:'+'0'*64),self.root/'cache')
+            with self.assertRaisesRegex(ValueError,r'1\.4\.3'):
+                m.assets(ctx,self.root/'out',True,False)
+        with mock.patch.object(m,'APP',app),mock.patch.object(m,'mod_game_version',return_value=''):
+            with self.assertRaisesRegex(ValueError,r'Common\.Product\.140'):
+                m.assets(ctx,self.root/'out2',True,False)
+        common_file=self.root/'out3'/m.ICON_FOLDER/m.PS5_ACTION_COMMON
+        common_file.parent.mkdir(parents=True,exist_ok=True); common_file.write_bytes(b'dummy')
+        with self.assertRaisesRegex(ValueError,r'1\.4\.3'):
+            m.ps5_action_backend().repair(self.root/'out3',[m.ICON_FOLDER],{},io.BytesIO(b''),m.ICON_FOLDER,lambda:None)
+
     def test_prebuilt_refuses_newer_or_unrecognized_program_before_staging(self):
         game,ctx=self.fixture()
         for version,message in [('0.3.14+abcdef','已阻止降级'),('custom','无法可靠识别'),
@@ -737,6 +817,49 @@ class ManagerTests(unittest.TestCase):
             self.assertFalse(m.ps5_action_outdated(dict(ps5=True, files={m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON:''},
                                                         ps5_action_revision=metadata['ps5_action_revision'])))
             self.assertTrue(m.ps5_action_outdated(dict(ps5=True, files={m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON:''})))
+
+    def test_launch_env_probe_strips_mixed_case_steamdeck_without_keyerror(self):
+        _, ctx = self.fixture()
+        with mock.patch.dict(os.environ, {'SteamDeck': '1', 'SteamOS': '1', 'TOTK_DEVICE_PROFILE': 'deck'}, clear=False):
+            env = m.launch_env(ctx, probe=True)
+            self.assertFalse(any(k.upper() in ('STEAMDECK', 'STEAMOS') for k in env))
+            self.assertEqual(env.get('TOTK_DEVICE_PROFILE'), 'desktop')
+            game_env = m.launch_env(ctx, probe=False)
+            self.assertTrue(any(k.upper() == 'STEAMDECK' and v == '1' for k, v in game_env.items()))
+            self.assertTrue(any(k.upper() == 'STEAMOS' and v == '1' for k, v in game_env.items()))
+            self.assertNotIn('TOTK_DEVICE_PROFILE', game_env)
+
+    def test_legacy_prebuilt_recipe_pairing_enforces_exact_manifest_digest(self):
+        game, ctx = self.fixture('0.4.0+abcdef')
+        app = self.root / 'legacy-pair-app'; payload = app / 'prebuilt'; payload.mkdir(parents=True)
+        (app / 'cache/recipes').mkdir(parents=True)
+        old_recipe = self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nold\n')})
+        shutil.move(old_recipe, app / 'recipe.zip')
+        old_rid = m.recipe_archive_digest(app / 'recipe.zip')
+        new_recipe = self.recipe('0.4.0', {'cfg.c': ('a\n', 'a\nnew\n')})
+        shutil.move(new_recipe, app / 'cache/recipes/recipe-0.4.0.zip')
+        with zipfile.ZipFile(app / 'assets.zip', 'w') as az:
+            az.writestr('manifest.json', '[]')
+        with mock.patch.object(m, 'APP', app):
+            aid = m.assets_id()
+        prebuilt_rid = '6' * 64
+        manifest_path = payload / 'manifest.json'
+        m.write_json(manifest_path, dict(schema=1, version='0.4.0', recipe_id=prebuilt_rid, assets_id=aid, games={'1.4.3': {}}))
+        manifest_sha = m.digest(manifest_path)
+        m.write_json(m.home(ctx) / 'active.json', dict(mode='direct', version='0.4.0', ps5=True, graphics=False,
+                                                         install_method='prebuilt', recipe_id=prebuilt_rid,
+                                                         prebuilt_id=manifest_sha, files={'totk.exe': m.digest(game)}))
+        pair = {manifest_sha: (prebuilt_rid, frozenset({old_rid}))}
+        with mock.patch.object(m, 'APP', app), mock.patch.dict(m._VERIFIED_LEGACY_PREBUILT_PAIRS, pair, clear=True):
+            bc = m.bundled_components()
+            self.assertEqual(bc['recipe_id'], prebuilt_rid)
+            self.assertFalse(m.health(ctx)['recipe_outdated'])
+            self.assertEqual(m.recipe_id('0.4.0'), m.recipe_archive_digest(app / 'cache/recipes/recipe-0.4.0.zip'))
+            # 篡改 manifest 任意字段使其哈希失效后，完整性检测必须立即拒绝
+            m.write_json(manifest_path, dict(schema=1, version='0.4.0', recipe_id=prebuilt_rid, assets_id=aid, games={'1.4.3': {'tampered': True}}))
+            with self.assertRaisesRegex(ValueError, '随包程序与修复配方不匹配'):
+                m.bundled_components()
+            self.assertTrue(m.health(ctx)['recipe_outdated'])
 
 
 if __name__ == '__main__':

@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="New build output directory")
     parser.add_argument("--compiler", type=Path)
     parser.add_argument("--local-payload", type=Path,
-                        help="Optional private, unpacked v1.2.8 payload directory")
+                        help="Optional private, unpacked payload directory (containing manager-version.txt, assets.zip and prebuilt/)")
     args = parser.parse_args()
 
     compiler = args.compiler
@@ -58,7 +58,8 @@ def main() -> None:
     needed = sum(p.stat().st_size for p in payload.iterdir() if p.is_file()) if payload else 0
     needed += 512 * 1024**2
     workspace.require(output, needed, "构建输出目录")
-    print(f"recipe_id={make_recipe(args.upstream, output / 'recipe.zip')}", flush=True)
+    recipe_digest = make_recipe(args.upstream, output / 'recipe.zip')
+    print(f"recipe_id={recipe_digest}", flush=True)
     for name in ("manager_install.py", "manager_update.py", "manager-version.txt", EXE + ".config"):
         shutil.copyfile(MANAGER / name, output / name)
     core = (MANAGER / "core.py").read_text(encoding="utf-8")
@@ -93,6 +94,26 @@ def main() -> None:
         shutil.copyfile(payload / "assets.zip", output / "assets.zip")
     if payload:
         shutil.copytree(payload / "prebuilt", output / "prebuilt")
+        manifest_path = output / "prebuilt/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if manifest.get("recipe_id") != recipe_digest:
+            raise ValueError(
+                f"Prebuilt manifest recipe_id {manifest.get('recipe_id')} does not match "
+                f"generated recipe.zip {recipe_digest}; rebuild prebuilt with the current recipe."
+            )
+        if manifest.get("assets_id"):
+            import hashlib, zipfile
+            h = hashlib.sha256()
+            with zipfile.ZipFile(output / "assets.zip") as az:
+                for name in sorted(az.namelist()):
+                    h.update(name.encode())
+                    h.update(az.read(name))
+            actual_assets = h.hexdigest()
+            if manifest["assets_id"] != actual_assets:
+                raise ValueError(
+                    f"Prebuilt manifest assets_id {manifest['assets_id']} does not match "
+                    f"assets.zip {actual_assets}."
+                )
 
     references = ("System.Windows.Forms", "System.Drawing", "System.Web.Extensions", "System.Management")
     subprocess.run(
@@ -103,9 +124,10 @@ def main() -> None:
          *(str(path) for path in sorted(MANAGER.glob("Manager*.cs")))],
         check=True, creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    prebuilt_check = "; assert core.bundled_components()['recipe_id'] == core.recipe_id()" if payload else ""
     subprocess.run(
         [str(runtime / "python.exe"), "-X", "utf8", "-c",
-         "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; assert core.ps5_action_backend().repair; print('backend imports OK')"],
+         "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; assert core.ps5_action_backend().repair" + prebuilt_check + "; print('backend imports OK')"],
         cwd=output, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     print(output / EXE)

@@ -664,6 +664,15 @@ int main(int argc, char **argv) {
         puts("TOTK_EXTENSIONS_V1:" TOTK_FEATURE_STRING(TOTK_PATCH_FEATURES) ":END");
         return 0;
     }
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--probe-cfg")) {
+            // --probe-cfg 校验配置表默认值，必须在 mem_init() 读取并缓存设备档位前固定为 desktop
+            plat_setenv("SteamDeck", NULL);
+            plat_setenv("SteamOS", NULL);
+            plat_setenv("TOTK_DEVICE_PROFILE", "desktop");
+            break;
+        }
+    }
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
     // The build that wrote the log, at its top: an attached log from another install or version shows at a glance.
     rt_log("version: TotK Recomp %s, game %d.%d.%d", rt_port_version, rt_game_version / 100, rt_game_version / 10 % 10,

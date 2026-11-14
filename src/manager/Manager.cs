@@ -109,9 +109,34 @@ public partial class Manager : Form {
             else File.Move(pending, file);
         } catch (Exception e) { Append("设置保存失败：" + e.Message); }
     }
+    string RuntimeEnvironmentError() {
+        var missing = new List<string>();
+        if (!File.Exists(Path.Combine(app, "python", "python.exe"))) missing.Add(@"python\python.exe");
+        if (!File.Exists(Path.Combine(app, "python", "python314.zip"))) missing.Add(@"python\python314.zip");
+        if (!File.Exists(Path.Combine(app, "core.py"))) missing.Add("core.py");
+        if (missing.Count == 0) return "";
+        return "缺少管理器运行环境（" + String.Join("、", missing.ToArray()) + "）。\n"
+            + "如果您下载的是轻量“更新包（update.zip）”，请将其解压覆盖到原有的完整版管理器目录中，不要单独运行；"
+            + "如果是首次安装，请下载包含完整运行时的安装包并完整解压全部文件。";
+    }
     async Task<Dictionary<string,object>> Execute(string action,Dictionary<string,object> extra=null,bool background=false) {
         if(busy&&!background)return null;
         if(action!="check"&&action!="discover"&&action!="manager-check"&&action!="manager-update"&&action!="recipe-check"&&action!="recipe-sync"&&selected==""){Append("请先选择游戏。");UpdateTaskStatus("请先选择游戏程序", Theme.Warning);return null;}
+        string envError = RuntimeEnvironmentError();
+        if (envError != "") {
+            string lineError = envError.Replace("\n", " ");
+            Append("操作失败：" + lineError);
+            if (!background) {
+                lastFailed = true;
+                lastOutcome = "缺少随包运行环境";
+                UpdateTaskStatus("缺少随包运行环境，请完整解压安装包或将更新包覆盖到完整版目录", Theme.Warning);
+                SetLogOpen(true);
+                if (!selftest && action != "inspect" && action != "check" && action != "discover" && action != "manager-check")
+                    MessageBox.Show(this, envError, action.StartsWith("launch") ? "启动未完成" : "操作未完成",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return null;
+        }
         if (!background) SetBusy(true);
         Dictionary<string,object> result=null;bool success=false;string failure="";
         try {

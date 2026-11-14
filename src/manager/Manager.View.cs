@@ -70,6 +70,15 @@ public partial class Manager {
             LoadSettings();
             LayoutRail();
             if (selftest) return;
+            string envError = RuntimeEnvironmentError();
+            if (envError != "") {
+                Append("运行环境不完整：" + envError.Replace("\n", " "));
+                lastFailed = true;
+                lastOutcome = "缺少随包运行环境";
+                UpdateTaskStatus("缺少随包运行环境，请完整解压安装包或将更新包覆盖到完整版目录", Theme.Warning);
+                SetLogOpen(true);
+                return;
+            }
             if (managerAuto.Checked) BeginInvoke(new Action(async () => await CheckManager(false, true)));
             await DetectGpu();
             if (selected != "") await Inspect();

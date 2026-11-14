@@ -448,9 +448,10 @@ def health(ctx):
         if not p.is_file() or digest(p) != wanted:
             missing.append(rel)
     status='旧独立版本（未直接安装）' if state.get('mode')!='direct' else '需要修复' if missing else '正常'
+    expected_recipe = _expected_installed_recipe_id(state) if (state.get('ps5') or state.get('graphics')) else None
     return dict(status=status, mode=state.get('mode','legacy'),version=state['version'], missing=missing,
                 files=len(state['files']), ps5=state['ps5'], graphics=state['graphics'],
-                recipe_outdated=bool(state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) and (ps5_action_outdated(state) or state.get('recipe_id')!=recipe_id(state['version'] if state.get('install_method')=='source' else None) or state.get('prebuilt_id') and (APP/'prebuilt/manifest.json').is_file() and state['prebuilt_id']!=digest(APP/'prebuilt/manifest.json'))))
+                recipe_outdated=bool(state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) and (ps5_action_outdated(state) or state.get('recipe_id')!=expected_recipe or state.get('prebuilt_id') and (APP/'prebuilt/manifest.json').is_file() and state['prebuilt_id']!=digest(APP/'prebuilt/manifest.json'))))
 
 
 def icons_health(ctx):
@@ -704,17 +705,14 @@ def sync_recipes(cache=None):
         return []
     target = Path(cache or APP / 'cache') / 'recipes'
     target.mkdir(parents=True, exist_ok=True)
-    have = {}
-    for item in recipe_candidates():
-        if item['basis']:
-            have[item['basis']] = item['path']
+    existing_hashes = {digest(item['path']) for item in recipe_candidates()}
     added, kept = [], []
     for row in rows:
         path = target / row['asset']
         if path.is_file() and digest(path) == row['sha256']:
             kept.append(row['basis'])
             continue
-        if have.get(row['basis']) and digest(have[row['basis']]) == row['sha256']:
+        if row['sha256'] in existing_hashes:
             kept.append(row['basis'])
             continue
         download(row['url'], path, row['sha256'], row['size'])
@@ -724,8 +722,62 @@ def sync_recipes(cache=None):
             path.unlink(missing_ok=True)
             raise ValueError('在线适配配方 %s 无法读取清单：%s' % (row['basis'], error)) from error
         added.append(row['basis'])
-    emit('适配配方已更新：新增 %d 份，已有 %d 份。' % (len(added), len(kept)))
+    if added:
+        emit('适配配方已更新：新增 %d 份，已有 %d 份。' % (len(added), len(kept)))
+    elif kept:
+        emit('本机适配配方已是最新内容（%s），未重复下载。' % '、'.join(kept))
+    else:
+        emit('适配配方检查完成，暂无可更新条目。')
     return added
+
+
+def recipe_archive_digest(archive):
+    """Deterministic SHA-256 of a recipe archive's member names and contents, ignoring ZIP timestamps."""
+    h = hashlib.sha256()
+    with zipfile.ZipFile(archive) as z:
+        for name in sorted(z.namelist()):
+            h.update(name.encode())
+            h.update(z.read(name))
+    return h.hexdigest()
+
+
+def _recipe_dedupe(items):
+    """Collapse byte/content-identical recipe archives; APP/recipe.zip takes precedence for identical bytes."""
+    ordered = sorted(items, key=lambda c: (0 if c['path'] == APP / 'recipe.zip' else 1, str(c['path'])))
+    seen, unique = set(), []
+    for item in ordered:
+        fp = recipe_archive_digest(item['path'])
+        if fp not in seen:
+            seen.add(fp)
+            unique.append(item)
+    return unique
+
+
+def _resolve_exact_recipe(candidates, version, commit=''):
+    """Pick a unique exact-basis recipe, preferring verified online updates over a stale bundled copy."""
+    exact = _recipe_dedupe([c for c in candidates if c['basis'] == version])
+    if not exact:
+        return None, None
+    pinned = [c for c in exact if c['commit'] and commit and c['commit'] == commit]
+    pool = pinned if pinned else exact
+    mode = 'verified' if pinned else 'basis'
+    if len(pool) == 1:
+        return pool[0], mode
+    # Online adapters downloaded into cache/recipes update an older bundled APP/recipe.zip without replacing it.
+    cache_dir = APP / 'cache' / 'recipes'
+    bundled = [c for c in pool if c['path'] == APP / 'recipe.zip']
+    local_extra = [c for c in pool if c['path'].parent == APP and c['path'] != APP / 'recipe.zip']
+    cached = [c for c in pool if c['path'].parent == cache_dir]
+    if not local_extra and len(bundled) == 1 and len(cached) == 1:
+        expected_name = f'recipe-{version}.zip'
+        catalog = read_json(cache_dir / 'recipe-catalog.json', {})
+        catalog_sha = next((r.get('sha256') for r in catalog.get('recipes', [])
+                            if isinstance(r, dict) and r.get('basis') == version), None)
+        cache_path = cached[0]['path']
+        if (catalog_sha and digest(cache_path) == catalog_sha) or cache_path.name == expected_name:
+            return cached[0], mode
+    details = '、'.join(f"{c['path'].name}({(c['commit'] or '无提交')[:8]})" for c in pool)
+    raise ValueError('管理器内有多份配方同时适配上游 %s（%s），无法确定使用哪一份；未覆盖任何游戏文件。' % (version, details))
 
 
 def select_recipe(source, adaptive=True):
@@ -744,27 +796,23 @@ def select_recipe(source, adaptive=True):
     if not version:
         raise ValueError('上游源码缺少 VERSION，无法确认适配配方；未覆盖任何游戏文件。')
     wanted = version_tuple(version)
-    exact = [c for c in candidates if c['basis'] == version]
-    pinned = [c for c in exact if c['commit'] and commit and c['commit'] == commit]
-    if len(pinned) == 1:
-        chosen, mode = pinned[0], 'verified'
-    elif len(exact) == 1:
-        chosen, mode = exact[0], 'basis'
-    elif len(exact) > 1:
-        raise ValueError('管理器内有多份配方同时适配上游 %s，无法确定使用哪一份；未覆盖任何游戏文件。' % version)
-    else:
+    chosen, mode = _resolve_exact_recipe(candidates, version, commit)
+    if chosen is None:
         if not adaptive or wanted is None:
             known = '、'.join(sorted({c['basis'] for c in candidates if c['basis']})) or '无'
             raise ValueError('当前上游版本 %s 没有对应的适配配方（本机配方适配：%s）。'
                              '可使用「一键适配」按当前版本安全适配，或改用「更新上游并重编」升级到官方最新正式版；未覆盖任何游戏文件。'
                              % (version, known))
-        older = [c for c in candidates if version_tuple(c['basis']) and version_tuple(c['basis']) < wanted]
+        older = _recipe_dedupe([c for c in candidates if version_tuple(c['basis']) and version_tuple(c['basis']) < wanted])
         if not older:
             known = '、'.join(sorted({c['basis'] for c in candidates if c['basis']})) or '无'
             raise ValueError('当前上游版本 %s 低于本机所有适配配方（本机配方适配：%s），无法安全适配。'
                              '使用「更新上游并重编」即可升级到官方最新正式版后再安装扩展；未覆盖任何游戏文件。'
                              % (version, known))
-        chosen, mode = max(older, key=lambda c: version_tuple(c['basis'])), 'rebased'
+        max_basis = max(version_tuple(c['basis']) for c in older)
+        top_older = [c for c in older if version_tuple(c['basis']) == max_basis]
+        chosen, _ = _resolve_exact_recipe(top_older, top_older[0]['basis'], commit)
+        mode = 'rebased'
     chosen = dict(chosen)
     chosen['version'], chosen['upstream_commit'], chosen['mode'] = version, commit, mode
     chosen['verified'] = mode == 'verified'
@@ -783,9 +831,9 @@ def try_sync(cache):
 def recipe_archive(version=None):
     """The recipe whose basis equals this upstream version; a leftover archive for another version is not it."""
     if version:
-        for item in recipe_candidates():
-            if item['basis'] == version:
-                return item['path']
+        chosen, _ = _resolve_exact_recipe(recipe_candidates(), version)
+        if chosen is not None:
+            return chosen['path']
     return APP / 'recipe.zip'
 
 
@@ -1013,18 +1061,17 @@ def recipe_id(version=None):
     cache would then disagree about what the installed build was made from.
     """
     if version:
-        exact = [item['path'] for item in recipe_candidates() if item['basis'] == version]
-        if len(exact) == 1:
-            archive = exact[0]
+        try:
+            chosen, _ = _resolve_exact_recipe(recipe_candidates(), version)
+        except ValueError:
+            chosen = None
+        if chosen is not None:
+            archive = chosen['path']
         else:
             return 'missing-recipe-' + version
     else:
         archive = APP / 'recipe.zip'
-    h=hashlib.sha256()
-    with zipfile.ZipFile(archive) as z:
-        for name in sorted(z.namelist()):
-            h.update(name.encode()); h.update(z.read(name))
-    return h.hexdigest()
+    return recipe_archive_digest(archive)
 
 
 def assets_id():
@@ -1093,12 +1140,42 @@ def install_prepared(ctx,package,original_hash):
     return state
 
 
+_VERIFIED_LEGACY_PREBUILT_PAIRS = {
+    '096e18d564aaaf8bc0149b74a356b5fded1f4b935570fe33c007c7488c883426': (
+        '67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c',
+        frozenset({'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516'}),
+    ),
+}
+
+
+def _expected_installed_recipe_id(state):
+    """Expected recipe identity for health checks: prebuilt stays paired to its verified manifest, source uses resolved version recipe."""
+    if state.get('install_method') == 'source':
+        return recipe_id(state['version'])
+    if (APP / 'prebuilt/manifest.json').is_file():
+        try:
+            return bundled_components()['recipe_id']
+        except ValueError:
+            return None
+    return recipe_id()
+
+
 def bundled_components():
-    manifest=read_json(APP/'prebuilt/manifest.json',{})
-    if manifest.get('schema')!=1 or not manifest.get('games'):
+    manifest_path = APP / 'prebuilt/manifest.json'
+    manifest = read_json(manifest_path, {})
+    if manifest.get('schema') != 1 or not manifest.get('games'):
         raise ValueError('预编译组件包不完整，请完整解压免编译安装包。本次不会自动下载或重编译。')
-    if manifest.get('recipe_id')!=recipe_id():raise ValueError('随包程序与修复配方不匹配，请更新完整预编译包；未改动游戏。')
-    if manifest.get('assets_id') and manifest['assets_id']!=assets_id():raise ValueError('随包资源与成品版本不匹配，请完整解压安装包。')
+    bundled_recipe = recipe_id()
+    paired = _VERIFIED_LEGACY_PREBUILT_PAIRS.get(digest(manifest_path))
+    legacy_ok = (
+        paired is not None
+        and manifest.get('recipe_id') == paired[0]
+        and bundled_recipe in paired[1]
+    )
+    if manifest.get('recipe_id') != bundled_recipe and not legacy_ok:
+        raise ValueError('随包程序与修复配方不匹配，请更新完整预编译包；未改动游戏。')
+    if manifest.get('assets_id') and manifest['assets_id'] != assets_id():
+        raise ValueError('随包资源与成品版本不匹配，请完整解压安装包。')
     return manifest
 
 
@@ -1265,10 +1342,37 @@ def local_resources(ctx):
     raise ValueError('此安装没有可用的本地资源索引；图标组件无法生成，原游戏未改动。')
 
 
+def ps5_assets_ready(ctx, rows=None):
+    """Ensure the player's RomFS matches the built-in 1.4.3 PS5 icon overlay before writing files or compiling."""
+    assets_zip = APP / 'assets.zip'
+    if not assets_zip.is_file():
+        return
+    with zipfile.ZipFile(assets_zip) as z:
+        metadata = json.loads(z.read('manifest.json'))
+    if not any(item.get('path') == ICON_FOLDER + '/' + PS5_ACTION_COMMON for item in metadata):
+        return
+    game_ver = mod_game_version(ctx)
+    if game_ver and game_ver != '1.4.3':
+        raise ValueError(
+            f'内置 PS5 图标资源仅支持 1.4.3 游戏资源，当前游戏为 {game_ver}。'
+            '请在「安装管理」中取消勾选「安装 PS5 图标与 USB 触觉支持」后再试（图形增强仍可正常安装），或改用 1.4.3 游戏资源；原游戏未改动。'
+        )
+    if rows is None:
+        rows = local_resources(ctx)
+    missing = [req for req in ('Pack/ZsDic.pack.zs', PS5_ACTION_COMMON) if req not in rows]
+    if missing:
+        raise ValueError(
+            f'当前游戏 RomFS 缺少 1.4.3 交互提示原资源（{"、".join(missing)}），无法安装或校准内置 PS5 图标。'
+            '若您使用的是 1.2.1 等非 1.4.3 游戏资源，请在「安装管理」中取消勾选「安装 PS5 图标与 USB 触觉支持」后再试；原游戏未改动。'
+        )
+
+
 def assets(ctx, output, ps5, graphics, style=None, *, version=None):
     """Unpack the packaged resources. style None writes all three icon folders side by side, which is what the
     game's F1 switch reads; a named style writes one folder only, for the standalone icon mod."""
     rows = local_resources(ctx) if ps5 else {}
+    if ps5:
+        ps5_assets_ready(ctx, rows)
     prefixes = (ICON_FOLDER + '/', ICON_FOLDER + '-stavaas/', ICON_FOLDER + '-alerion/')
     groups = {prefix: {} for prefix in prefixes}
     latest_fsr = version is None or tuple(map(int, version.removeprefix("v").split("."))) >= (0, 4, 0)
@@ -1386,9 +1490,9 @@ def launch_env(ctx, probe=False):
     # deliberately overrides above the table (cfg.c DECK); a launcher or handheld tool
     # may inject SteamDeck=1 and trip them. Only the probe paths need it stripped.
     if probe:
-        lowered = {key.upper() for key in env}
-        for key in [k for k in lowered if k in ('STEAMDECK', 'STEAMOS', 'TOTK_DEVICE_PROFILE')]:
-            env.pop(key)
+        for key in [k for k in env if k.upper() in ('STEAMDECK', 'STEAMOS', 'TOTK_DEVICE_PROFILE')]:
+            env.pop(key, None)
+        env['TOTK_DEVICE_PROFILE'] = 'desktop'
     env.update(TOTK_EXEFS=ctx['exefs'], TOTK_ROMFS=ctx['romfs'], TOTK_PROFILE_DIR=ctx['profile'],
                TOTK_MODS_DIR=str(Path(ctx['game']).parent / 'mods'))
     if ctx['fonts']:
@@ -1581,6 +1685,8 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
     ensure_idle(ctx)
     if not ps5 and not graphics and not official:
         raise ValueError('请至少选择一个扩展组件。')
+    if ps5 and not official:
+        ps5_assets_ready(ctx)
     official_hash = digest(ctx['game'])
     root=Path(ctx['game']).parent
     # Fail before downloads/builds when the selected program or state directory is locked/read-only.
@@ -1905,11 +2011,14 @@ def dispatch(request):
         return
     if action in ('recipe-check','recipe-sync'):
         # A third, independent update channel: adapters can gain a new upstream basis without a manager release.
-        local = [dict(basis=c['basis'], commit=c['commit'], file=c['path'].name) for c in recipe_candidates()]
+        def local_rows():
+            return [dict(basis=c['basis'], commit=c['commit'], file=c['path'].name,
+                         source='随包内置' if c['path'].parent == APP else '在线缓存') for c in recipe_candidates()]
+        local = local_rows()
         if action == 'recipe-sync':
             added = sync_recipes(cache)
-            local = [dict(basis=c['basis'], commit=c['commit'], file=c['path'].name) for c in recipe_candidates()]
-            emit('适配配方已更新：新增 %d 份。' % len(added), result=dict(added=added, local=local))
+            local = local_rows()
+            emit('适配配方检查完成。', result=dict(added=added, local=local))
             return
         online = recipe_catalog(cache)
         covered = {c['basis'] for c in recipe_candidates()}

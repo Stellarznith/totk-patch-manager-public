@@ -18,7 +18,7 @@
 ## Downloads and installation
 
 1. Set up TotK Recomp with your own lawfully obtained game resources and locate the resulting `totk.exe`. [Upstream project and setup instructions](https://github.com/valentderah/totk-pc-recomp)
-2. For a first install, build the manager with the Windows guide. The public **v1.3.2 Windows x64 update ZIP** uses an existing manager installation's Python environment and local components. On v1.2.9 or later, open **Settings → About and manager updates**. For a manual update, verify the ZIP with `SHA256SUMS.txt`. [Build guide](docs/build.md) · [First upgrade and online updates](docs/manager-update.md) · [v1.3.2 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.2)
+2. For a first install, build the manager with the Windows guide. The public **v1.3.4 Windows x64 update ZIP** uses an existing manager installation's Python environment and local components. On v1.2.9 or later, open **Settings → About and manager updates**. For a manual update, verify the ZIP with `SHA256SUMS.txt`. [Build guide](docs/build.md) · [First upgrade and online updates](docs/manager-update.md) · [v1.3.4 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.4)
 3. Select your existing `totk.exe` and inspect its detected version. Choose controller, graphics or combined installation if you have a compatible local component bundle. Configure supported options in the game's F1 menu after installation.
 
 The GitHub repository publishes source, documentation and reviewed manager-only updates. Offline installation of all six CPU/component combinations requires a matching local payload. The v1.2.8 GitHub Release contains source archives. [Release audit](docs/release-audit.md) · [v1.2.8 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.8)
@@ -27,7 +27,7 @@ The GitHub repository publishes source, documentation and reviewed manager-only 
 
 | Version | Meaning |
 | --- | --- |
-| **Manager version** | v1.3.2 selects and relocates patch recipes by source content. v1.3.1 fixed the PS5 action prompt. The Mod Center was introduced in v1.3.0. |
+| **Manager version** | v1.3.4 fixes Steam Deck probe initialization order & env var casing, pairs legacy prebuilt packages with verified recipes, improves missing 1.4.3 RomFS & update-ZIP launch messages. v1.3.2 selects and relocates patch recipes by source content. |
 | **Detected upstream version** | The manager reads the version of the selected TotK Recomp executable. Use **Installation → Check upstream updates** to query newer upstream releases. |
 | **Verified compatibility** | The current offline payload is built from **TotK Recomp 0.4.0**. v1.3.2 also merges the same recipe into a 0.4.0-series tree whose version string, keys or indentation have changed, and refuses the install when an upstream edit collides with a patched line. The audited v1.2.8 package exercised six offline combinations, install/repair/rollback and PS5 prompts at 1920×1080 and 3840×1080. |
 | **Game resource version** | **1.4.3** is the verified game resource version for the current offline payload. The manager checks game resources separately against the chosen package or upstream build metadata. |
@@ -68,7 +68,7 @@ Nintendo, The Legend of Zelda and other names and marks belong to their respecti
 ### 下载与安装
 
 1. 使用自行合法取得的游戏资源完成 TotK Recomp 安装，找到生成的 `totk.exe`。 [上游安装说明](https://github.com/valentderah/totk-pc-recomp)
-2. 首次安装可按构建说明生成管理器。公开的 **v1.3.2 Windows x64 更新 ZIP** 用于升级已有管理器，沿用原安装的 Python 环境及本地组件。v1.2.9 及以上可通过「设置 → 关于与管理器更新」升级。手动更新时请先用 `SHA256SUMS.txt` 校验。 [Windows 构建说明](docs/build.md) · [首次升级与在线更新](docs/manager-update.md) · [v1.3.2 下载](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.2)
+2. 首次安装可按构建说明生成管理器。公开的 **v1.3.4 Windows x64 更新 ZIP** 用于升级已有管理器，沿用原安装的 Python 环境及本地组件。v1.2.9 及以上可通过「设置 → 关于与管理器更新」升级。手动更新时请先用 `SHA256SUMS.txt` 校验。 [Windows 构建说明](docs/build.md) · [首次升级与在线更新](docs/manager-update.md) · [v1.3.4 下载](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.3.4)
 3. 在管理器里选择已有 `totk.exe`，查看版本检测结果。有兼容的本地成品时，可选 PS5、图形或整合安装。安装后用游戏内 F1 调整可用功能。
 
 GitHub 仓库提供源码、文档和通过分发审核的管理器更新。六种离线 CPU／组件组合需要匹配的本地成品。v1.2.8 的 GitHub Release 提供源码。 [发布审计](docs/release-audit.md) · [v1.2.8 Release](https://github.com/Stellarznith/totk-patch-manager-public/releases/tag/v1.2.8)
@@ -77,7 +77,7 @@ GitHub 仓库提供源码、文档和通过分发审核的管理器更新。六�
 
 | 版本 | 含义 |
 | --- | --- |
-| **工具自身版本** | v1.3.2 按源码内容选择并重定位补丁配方。v1.3.1 修复 PS5 交互提示。MOD 管理自 v1.3.0 起提供。 |
+| **工具自身版本** | v1.3.4 修复 Steam Deck 探针初始化顺序与环境变量大小写问题，建立历史预编译包与配方精确配对，并完善 1.4.3 资源缺失与更新包独立运行提示。v1.3.2 按源码内容选择并重定位补丁配方。 |
 | **实际识别的上游版本** | 从所选 TotK Recomp 程序中读取。通过「安装管理 → 检查上游更新」查看上游新版本。 |
 | **已验证兼容版本** | 当前离线成品基于 **TotK Recomp 0.4.0**。v1.3.2 还能把同一份配方合并进版本号、键名或缩进发生变化但同属 0.4.0 系列的源码树；上游改动与补丁行真正冲突时则拒绝安装。v1.2.8 审计覆盖六种离线组合、安装修复回滚，以及 1920×1080、3840×1080 的 PS5 提示。 |
 | **游戏资源版本** | 当前离线成品已验证 **1.4.3**。管理器根据所用成品清单或上游构建元数据单独核验游戏资源。 |
