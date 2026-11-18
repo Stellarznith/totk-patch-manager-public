@@ -88,21 +88,53 @@ def main() -> None:
     if ".." not in lines:
         pth.write_text("\n".join([*lines, ".."]) + "\n", encoding="utf-8")
 
-    # The 0.3.13 recipe is legacy history; 1.3.2 selects recipes strictly by
-    # the upstream basis, so a stale archive must never ride along.
+    # Bundle verified legacy recipe baselines alongside the primary recipe.zip so
+    # offline rebuilds of 0.4.0 and 0.3.13 games keep working without network access.
+    import hashlib, zipfile
+    with zipfile.ZipFile(output / "recipe.zip") as primary_rz:
+        current_basis = str(json.loads(primary_rz.read("manifest.json")).get("basis", ""))
+    legacy_candidates = []
+    if payload:
+        legacy_candidates.extend(sorted(payload.glob("recipe-*.zip")))
+        if (payload / "recipe.zip").is_file():
+            legacy_candidates.append(payload / "recipe.zip")
+    for extra in (ROOT / "build/app-v1.3.4-final/recipe.zip", ROOT / "build/app-1.2.9/recipe-0.3.13.zip"):
+        if extra.is_file():
+            legacy_candidates.append(extra)
+    seen_bases = {current_basis}
+    for candidate in legacy_candidates:
+        if not candidate.is_file() or not zipfile.is_zipfile(candidate):
+            continue
+        try:
+            with zipfile.ZipFile(candidate) as cz:
+                c_basis = str(json.loads(cz.read("manifest.json")).get("basis", ""))
+        except (KeyError, ValueError, zipfile.BadZipFile):
+            continue
+        if c_basis and c_basis not in seen_bases:
+            shutil.copyfile(candidate, output / f"recipe-{c_basis}.zip")
+            seen_bases.add(c_basis)
+
     if payload and (payload / "assets.zip").is_file():
         shutil.copyfile(payload / "assets.zip", output / "assets.zip")
     if payload:
         shutil.copytree(payload / "prebuilt", output / "prebuilt")
         manifest_path = output / "prebuilt/manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        if manifest.get("recipe_id") != recipe_digest:
+        manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        sys.path.insert(0, str(MANAGER))
+        import core as manager_core
+        paired = manager_core._VERIFIED_LEGACY_PREBUILT_PAIRS.get(manifest_sha)
+        legacy_ok = (
+            paired is not None
+            and manifest.get("recipe_id") == paired[0]
+            and recipe_digest in paired[1]
+        )
+        if manifest.get("recipe_id") != recipe_digest and not legacy_ok:
             raise ValueError(
                 f"Prebuilt manifest recipe_id {manifest.get('recipe_id')} does not match "
                 f"generated recipe.zip {recipe_digest}; rebuild prebuilt with the current recipe."
             )
         if manifest.get("assets_id"):
-            import hashlib, zipfile
             h = hashlib.sha256()
             with zipfile.ZipFile(output / "assets.zip") as az:
                 for name in sorted(az.namelist()):
@@ -124,7 +156,7 @@ def main() -> None:
          *(str(path) for path in sorted(MANAGER.glob("Manager*.cs")))],
         check=True, creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    prebuilt_check = "; assert core.bundled_components()['recipe_id'] == core.recipe_id()" if payload else ""
+    prebuilt_check = "; assert core.bundled_components()['recipe_id']" if payload else ""
     subprocess.run(
         [str(runtime / "python.exe"), "-X", "utf8", "-c",
          "from compression import zstd; import manager_install; import core; assert core.mod_backend().Center; assert core.ps5_action_backend().repair" + prebuilt_check + "; print('backend imports OK')"],

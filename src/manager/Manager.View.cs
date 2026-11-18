@@ -248,7 +248,7 @@ public partial class Manager {
             Row(MakeButton("前往备份与诊断", Symbol.Shield, ButtonTone.Secondary, (s, e) => ShowPage(4))));
 
         var install = Page("安装管理", "选择组件，管理安装、更新、修复和还原。");
-        Card(install, "安装内置成品", "内置 " + bundledVersion + " 可离线安装，安装前自动备份游戏程序。",
+        Card(install, "安装内置成品", "内置 " + bundledVersion + " 可离线安装；若当前游戏版本更新，将自动同步配方并按当前版本编译安装，安装前自动备份。",
             ps5, graphics, Row(Command("apply", "安装所选组件", Symbol.Download, ButtonTone.Primary, async () => await Build("apply")),
                 Command("repair", "检查 / 修复", Symbol.Refresh, ButtonTone.Secondary, async () => await Repair()),
                 Command("check", "检查上游更新", Symbol.Search, ButtonTone.Quiet, async () => await Check(true))));

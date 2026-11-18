@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "input.h"
 #include "dualsense_hd.h"
@@ -94,6 +95,7 @@ static void npad_states(Cpu *c, uint32_t want) {
     if (live) {
         s.attributes = ATTR_CONNECTED;
         input_poll(&s.buttons, &s.lx, &s.ly, &s.rx, &s.ry);
+        vk_reflex_marker(6, vk_reflex_frame());   // VK_LATENCY_MARKER_INPUT_SAMPLE_NV
     }
     *out = s;
     ret_x(c, 1);

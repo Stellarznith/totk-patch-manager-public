@@ -558,6 +558,17 @@ def component_release(cache,tag):
     return info,asset
 
 
+def _known_release_commit(tag):
+    ver = str(tag or '').removeprefix('v')
+    bundled = read_json(APP / 'prebuilt/manifest.json', {})
+    if bundled.get('version') == ver and re.fullmatch(r'[0-9a-f]{40}', str(bundled.get('source_commit', ''))):
+        return str(bundled['source_commit'])
+    for item in recipe_candidates():
+        if item.get('basis') == ver and re.fullmatch(r'[0-9a-f]{40}', str(item.get('commit', ''))):
+            return str(item['commit'])
+    return ''
+
+
 def toolkit(cache, info, asset):
     tag = info['tag_name']
     target = cache / tag / 'toolkit'
@@ -570,14 +581,16 @@ def toolkit(cache, info, asset):
     version = (kit / 'VERSION').read_text().strip()
     # The source is selected from the actual official binary release identity, not a moving branch.
     commit = version.split('+', 1)[1] if '+' in version else tag
+    known_commit = _known_release_commit(tag) if '+' not in version else ''
     source_dest = cache / tag / 'source'
     archive = cache / tag / 'source.zip'
     source = source_tree(source_dest)
     saved = read_json(source_dest / 'verified.json', {})
     # GitHub names the extracted folder after the full commit, so an intact tree identifies itself.
     named = re.search(r'totk-pc-recomp-([0-9a-f]{40})', source.name) if source else None
-    if source and named and saved.get('commit') != named[1]:
-        write_json(source_dest / 'verified.json', dict(commit=named[1], sha256=digest(archive) if usable_archive(archive) else ''))
+    inferred = named[1] if named else known_commit
+    if source and inferred and saved.get('commit') != inferred:
+        write_json(source_dest / 'verified.json', dict(commit=inferred, sha256=digest(archive) if usable_archive(archive) else ''))
         saved = read_json(source_dest / 'verified.json', {})
     if source and re.fullmatch(r'[0-9a-f]{40}', str(saved.get('commit', ''))):
         emit('复用已验证的上游源码。')
@@ -590,7 +603,7 @@ def toolkit(cache, info, asset):
     if source is None:
         raise ValueError('上游源码解压不完整，请重试。')
     named = re.search(r'totk-pc-recomp-([0-9a-f]{40})', source.name)
-    resolved = named[1] if named else get_json(API + '/commits/' + commit)['sha']
+    resolved = named[1] if named else (known_commit or get_json(API + '/commits/' + commit)['sha'])
     write_json(source_dest / 'verified.json', dict(commit=resolved, sha256=digest(archive)))
     return kit, source
 
@@ -898,6 +911,14 @@ def locate(block, haystack, k=3):
     edits, so the same edit lives at a different number in every release. The surrounding text is the identity, and
     the wider the context that matches exactly once, the stronger the claim that this is the same code.
     """
+    if isinstance(block, str):
+        block = anchors(block)
+    else:
+        block = [' '.join(str(line).split()) for line in block]
+    if isinstance(haystack, str):
+        haystack = anchors(haystack)
+    else:
+        haystack = [' '.join(str(line).split()) for line in haystack]
     if not block:
         return []
     size = len(block)
@@ -954,19 +975,60 @@ def rebase_edits(base, ours, upstream, minimum=1):
         # A pure insertion has no span of its own; its neighbors are what identify the place it belongs to.
         left, right = norm_base[:i], norm_base[i:]
         placed = None
-        for take_left in range(min(3, len(left)), 0, -1):
-            for take_right in range(min(3, len(right)), -1, -1):
-                if take_left + take_right < minimum:
-                    continue
-                before, after = left[len(left) - take_left:], right[:take_right]
-                hits = [at + take_left for at in range(len(norm_up) - take_left - take_right + 1)
-                        if norm_up[at:at + take_left] == before
-                        and norm_up[at + take_left:at + take_left + take_right] == after]
-                if len(hits) == 1:
-                    placed = hits[0]
+        for max_win in (3, 6):
+            for take_left in range(min(max_win, len(left)), 0, -1):
+                for take_right in range(min(max_win, len(right)), -1, -1):
+                    if take_left + take_right < minimum:
+                        continue
+                    if max_win > 3 and take_left <= 3 and take_right <= 3:
+                        continue
+                    before, after = left[len(left) - take_left:], right[:take_right]
+                    hits = [at + take_left for at in range(len(norm_up) - take_left - take_right + 1)
+                            if norm_up[at:at + take_left] == before
+                            and norm_up[at + take_left:at + take_left + take_right] == after]
+                    if len(hits) == 1:
+                        placed = hits[0]
+                        break
+                if placed is not None:
                     break
             if placed is not None:
                 break
+        if placed is None:
+            for take_right in range(min(6, len(right)), max(minimum, 2) - 1, -1):
+                after = right[:take_right]
+                hits = locate(after, norm_up)
+                if len(hits) == 1:
+                    placed = hits[0]
+                    break
+        if placed is None:
+            for gap_left in range(0, min(4, len(left)) + 1):
+                for gap_right in range(0, min(4, len(right)) + 1):
+                    if gap_left == 0 and gap_right == 0:
+                        continue
+                    rem_left = len(left) - gap_left
+                    rem_right = len(right) - gap_right
+                    for win_left in range(min(6, rem_left), 1, -1):
+                        for win_right in range(min(6, rem_right), 1, -1):
+                            if win_left + win_right < 5:
+                                continue
+                            before = left[rem_left - win_left:rem_left]
+                            after = right[gap_right:gap_right + win_right]
+                            if len(locate(before, norm_base)) != 1 or len(locate(after, norm_base)) != 1:
+                                continue
+                            up_before = locate(before, norm_up)
+                            up_after = locate(after, norm_up)
+                            if len(up_before) == 1 and len(up_after) == 1:
+                                b_end = up_before[0] + win_left
+                                a_start = up_after[0]
+                                if 0 <= a_start - b_end <= gap_left + gap_right + 6:
+                                    placed = b_end if gap_left == 0 else a_start
+                                    break
+                        if placed is not None:
+                            break
+                    if placed is not None:
+                        break
+                if placed is not None:
+                    break
         if placed is None:
             raise ValueError('扩展在第 %d 行插入的代码找不到唯一插入点（上下文已变化），需更新适配配方。' % (i + 1))
         moved.append((placed, placed, block))
@@ -1143,7 +1205,19 @@ def install_prepared(ctx,package,original_hash):
 _VERIFIED_LEGACY_PREBUILT_PAIRS = {
     '096e18d564aaaf8bc0149b74a356b5fded1f4b935570fe33c007c7488c883426': (
         '67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c',
-        frozenset({'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516'}),
+        frozenset({
+            '67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c',
+            'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516',
+            'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211',
+            'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7',
+        }),
+    ),
+    'ca00d2275bd0525bfccd5dd79ea2c6e2b5d810d0438d077aca5c63937ed867f8': (
+        'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211',
+        frozenset({
+            'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211',
+            'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7',
+        }),
     ),
 }
 
@@ -1367,12 +1441,19 @@ def ps5_assets_ready(ctx, rows=None):
         )
 
 
-def assets(ctx, output, ps5, graphics, style=None, *, version=None):
+def assets(ctx, output, ps5, graphics, style=None, *, version=None, allow_ps5_degrade=False):
     """Unpack the packaged resources. style None writes all three icon folders side by side, which is what the
     game's F1 switch reads; a named style writes one folder only, for the standalone icon mod."""
-    rows = local_resources(ctx) if ps5 else {}
+    rows = {}
     if ps5:
-        ps5_assets_ready(ctx, rows)
+        try:
+            rows = local_resources(ctx)
+            ps5_assets_ready(ctx, rows)
+        except ValueError as err:
+            if not allow_ps5_degrade:
+                raise
+            emit(f'当前游戏资源不支持 1.4.3 专属 PS5 图标与交互按键校准（{err}）；已自动跳过 1.4.3 图标贴图，保留 PS5 高清触觉与所选图形扩展。')
+            ps5 = False
     prefixes = (ICON_FOLDER + '/', ICON_FOLDER + '-stavaas/', ICON_FOLDER + '-alerion/')
     groups = {prefix: {} for prefix in prefixes}
     latest_fsr = version is None or tuple(map(int, version.removeprefix("v").split("."))) >= (0, 4, 0)
@@ -1686,7 +1767,10 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
     if not ps5 and not graphics and not official:
         raise ValueError('请至少选择一个扩展组件。')
     if ps5 and not official:
-        ps5_assets_ready(ctx)
+        try:
+            ps5_assets_ready(ctx)
+        except ValueError as err:
+            emit(f'检测到非 1.4.3 游戏资源或缺少 1.4.3 交互布局（{err}）：本次重编将跳过 1.4.3 专属 PS5 图标与按键校准，继续编译安装 PS5 高清触觉与所选图形扩展。')
     official_hash = digest(ctx['game'])
     root=Path(ctx['game']).parent
     # Fail before downloads/builds when the selected program or state directory is locked/read-only.
@@ -1783,7 +1867,7 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
             shutil.copy2(p, deployment / p.name)
     for p in (kit / 'bin').glob('*.dll'):
         shutil.copy2(p, deployment / p.name)
-    prompt_revision = (assets(ctx, deployment, ps5, graphics, version=tag) or 0) if not official else 0
+    prompt_revision = (assets(ctx, deployment, ps5, graphics, version=tag, allow_ps5_degrade=True) or 0) if not official else 0
     original_index = Path(ctx['game']).parent / 'romfs-index.bin'
     if official:shutil.copy2(output/'romfs-index.bin',deployment/'romfs-index.bin')
     elif original_index.is_file():shutil.copy2(original_index, deployment / original_index.name)
@@ -1795,35 +1879,47 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
         shutil.copy2(ini, deployment / 'totk.ini')
     old_dlss = Path(ctx['game']).parent / 'nvngx_dlss.dll'
     cached_dlss = cache / 'dlss'
-    if not official and tag.removeprefix('v') == '0.4.0':
-        bundled = bundled_components()['games']['1.4.3']['common']
-        archive = inside(APP / 'prebuilt', bundled['path'])
-        name = 'nvngx_dlss.dll'
-        with zipfile.ZipFile(archive) as package:
-            dlss = package.read(name)
-        if hashlib.sha256(dlss).hexdigest() != bundled['files'][name]:
-            raise ValueError('内置 DLSS 运行库校验失败，请重新解压安装包。')
-        (deployment / name).write_bytes(dlss)
-    elif old_dlss.is_file() and not official:
-        shutil.copy2(old_dlss, deployment / old_dlss.name)
-    else:
-        # Use the exact NVIDIA DLL specified by this official release's installer.
-        text = (source / 'installer/steps.py').read_text(encoding='utf-8')
-        url = re.search(r"DLSS_URL\s*=\s*f?['\"]([^'\"]+)", text)
-        sha = re.search(r"DLSS_SHA256\s*=\s*['\"]([0-9a-f]{64})", text)
-        if url and sha:
-            version = re.search(r"DLSS_VERSION\s*=\s*['\"]([^'\"]+)", text)
-            address = url[1].replace('{DLSS_VERSION}', version[1] if version else '').replace('{DLSS_DLL}', 'nvngx_dlss.dll')
-            # Keep the verified DLL once per hash so a rebuild or a reinstall never downloads it again.
-            stored = cached_dlss / (sha[1] + '.dll')
-            if old_dlss.is_file() and digest(old_dlss) == sha[1]:
-                shutil.copy2(old_dlss, deployment / 'nvngx_dlss.dll')
-            elif stored.is_file() and digest(stored) == sha[1]:
-                emit('复用已下载的 DLSS 运行库。')
-                shutil.copy2(stored, deployment / 'nvngx_dlss.dll')
-            else:
-                download(address, stored, sha[1])
-                shutil.copy2(stored, deployment / 'nvngx_dlss.dll')
+    bundled_dlss = None
+    if not official and (APP / 'prebuilt/manifest.json').is_file():
+        try:
+            games_map = bundled_components().get('games', {})
+            bundled_dlss = (games_map.get(game_version) or games_map.get('1.4.3') or next(iter(games_map.values()), {})).get('common')
+        except ValueError:
+            bundled_dlss = None
+    dlss_written = False
+    if bundled_dlss and 'nvngx_dlss.dll' in bundled_dlss.get('files', {}):
+        try:
+            archive = inside(APP / 'prebuilt', bundled_dlss['path'])
+            name = 'nvngx_dlss.dll'
+            if archive.is_file():
+                with zipfile.ZipFile(archive) as package:
+                    dlss = package.read(name)
+                if hashlib.sha256(dlss).hexdigest() == bundled_dlss['files'][name]:
+                    (deployment / name).write_bytes(dlss)
+                    dlss_written = True
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            dlss_written = False
+    if not dlss_written:
+        if old_dlss.is_file() and not official:
+            shutil.copy2(old_dlss, deployment / old_dlss.name)
+        else:
+            # Use the exact NVIDIA DLL specified by this official release's installer.
+            text = (source / 'installer/steps.py').read_text(encoding='utf-8')
+            url = re.search(r"DLSS_URL\s*=\s*f?['\"]([^'\"]+)", text)
+            sha = re.search(r"DLSS_SHA256\s*=\s*['\"]([0-9a-f]{64})", text)
+            if url and sha:
+                version = re.search(r"DLSS_VERSION\s*=\s*['\"]([^'\"]+)", text)
+                address = url[1].replace('{DLSS_VERSION}', version[1] if version else '').replace('{DLSS_DLL}', 'nvngx_dlss.dll')
+                # Keep the verified DLL once per hash so a rebuild or a reinstall never downloads it again.
+                stored = cached_dlss / (sha[1] + '.dll')
+                if old_dlss.is_file() and digest(old_dlss) == sha[1]:
+                    shutil.copy2(old_dlss, deployment / 'nvngx_dlss.dll')
+                elif stored.is_file() and digest(stored) == sha[1]:
+                    emit('复用已下载的 DLSS 运行库。')
+                    shutil.copy2(stored, deployment / 'nvngx_dlss.dll')
+                else:
+                    download(address, stored, sha[1])
+                    shutil.copy2(stored, deployment / 'nvngx_dlss.dll')
     # Reuse shader translations only when the translator identity matches.
     original = Path(ctx['game']).parent
     if (original / 'totk_xlate.id').is_file() and digest(original / 'totk_xlate.id') == digest(deployment / 'totk_xlate.id'):
@@ -1982,6 +2078,14 @@ def main(request):
             lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
 
 
+def _prebuilt_fallback_to_rebuild(message):
+    return (
+        ('高于管理器内置的' in message and '已阻止降级' in message)
+        or '当前是手动构建的其它上游版本' in message
+        or '这份游戏资源尚无随包成品' in message
+    )
+
+
 def dispatch(request):
     global CANCEL, LOG, NETWORK
     cache = Path(request.get('cache') or APP / 'cache').resolve(); cache.mkdir(parents=True, exist_ok=True)
@@ -2084,7 +2188,20 @@ def dispatch(request):
     elif action in ['apply','repair']:
         state=active(ctx)
         selected=state if action=='repair' and state.get('mode')=='direct' and (state.get('ps5') or state.get('graphics')) else request
-        install_prebuilt(ctx,selected.get('ps5',True),selected.get('graphics',True),cache,repair=action=='repair')
+        want_ps5, want_graphics = selected.get('ps5',True), selected.get('graphics',True)
+        try:
+            install_prebuilt(ctx,want_ps5,want_graphics,cache,repair=action=='repair')
+        except ValueError as err:
+            if not _prebuilt_fallback_to_rebuild(str(err)):
+                raise
+            raw_ver = (state.get('version') if action == 'repair' and state.get('install_method') == 'source' else '') or ctx['version']
+            tag = str(raw_ver or '').split('+')[0]
+            if not re.fullmatch(r'\d+\.\d+\.\d+', tag):
+                raise
+            emit(f'当前游戏（{ctx["version"]}）高于或不同于随包离线成品，不降级游戏；正在自动同步适配配方并按当前版本（{tag}）编译安装。')
+            try_sync(cache)
+            info, asset = component_release(cache, tag)
+            build(ctx, want_ps5, want_graphics, info, asset, cache)
     elif action in ['update','rebuild-current','refresh-recipes']:
         if action != 'refresh-recipes':
             # Adapters are refreshed before the build so a newly published one is used instead of rebasing an old one.

@@ -533,15 +533,29 @@ class ManagerTests(unittest.TestCase):
     def test_ps5_assets_compatibility_blocks_missing_143_resources_cleanly(self):
         game,ctx=self.fixture('0.4.0+abcdef')
         app=self.root/'ps5-compat-app';app.mkdir()
+        fg_bytes=b'fsr-framegen-dll'
         with zipfile.ZipFile(app/'assets.zip','w') as az:
             az.writestr('0',zstd.compress(b'common',level=1))
-            az.writestr('manifest.json',json.dumps([dict(path=m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON,kind=2,entry='0',sha256=hashlib.sha256(b'common').hexdigest())]))
+            az.writestr('1',zstd.compress(fg_bytes,level=1))
+            az.writestr('manifest.json',json.dumps([
+                dict(path=m.ICON_FOLDER+'/'+m.PS5_ACTION_COMMON,kind=2,entry='0',sha256=hashlib.sha256(b'common').hexdigest()),
+                dict(path='amd_fidelityfx_framegeneration_vk.dll',kind=2,entry='1',sha256=hashlib.sha256(fg_bytes).hexdigest()),
+            ]))
         (game.parent/'romfs/index.json').write_text(json.dumps(dict(files=[dict(path='UI/LayoutArchive/Common.Product.120.Nin_NX_NVN.blarc.zs',offset=0,size=1)])))
-        with mock.patch.object(m,'APP',app),mock.patch.object(m,'mod_game_version',return_value='1.2.1'),mock.patch.object(m,'toolkit',side_effect=AssertionError('should stop before toolkit')):
+        with mock.patch.object(m,'APP',app),mock.patch.object(m,'mod_game_version',return_value='1.2.1'):
             with self.assertRaisesRegex(ValueError,r'1\.4\.3'):
-                m._build(ctx,True,True,dict(tag_name='v0.4.0'),dict(name='a.zip',digest='sha256:'+'0'*64),self.root/'cache')
+                m.install_icons(ctx)
             with self.assertRaisesRegex(ValueError,r'1\.4\.3'):
                 m.assets(ctx,self.root/'out',True,False)
+            # 源码重编允许非 1.4.3 优雅降级：跳过 1.4.3 图标贴图与按键校准，正常解压图形扩展并继续进入 toolkit 编译
+            degraded_out=self.root/'out-degraded'
+            self.assertEqual(m.assets(ctx,degraded_out,True,True,version='0.4.1',allow_ps5_degrade=True) or 0,0)
+            self.assertFalse((degraded_out/m.ICON_FOLDER).exists())
+            self.assertEqual((degraded_out/'amd_fidelityfx_framegeneration_vk.dll').read_bytes(),fg_bytes)
+            with mock.patch.object(m,'toolkit',side_effect=RuntimeError('reached-toolkit')) as tk:
+                with self.assertRaisesRegex(RuntimeError,'reached-toolkit'):
+                    m._build(ctx,True,True,dict(tag_name='v0.4.1'),dict(name='a.zip',digest='sha256:'+'0'*64),self.root/'cache')
+                tk.assert_called_once()
         with mock.patch.object(m,'APP',app),mock.patch.object(m,'mod_game_version',return_value=''):
             with self.assertRaisesRegex(ValueError,r'Common\.Product\.140'):
                 m.assets(ctx,self.root/'out2',True,False)
@@ -860,6 +874,127 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '随包程序与修复配方不匹配'):
                 m.bundled_components()
             self.assertTrue(m.health(ctx)['recipe_outdated'])
+
+    def test_verified_legacy_prebuilt_pairs_cover_v132_v133_and_v134(self):
+        v132_sha = '096e18d564aaaf8bc0149b74a356b5fded1f4b935570fe33c007c7488c883426'
+        v134_sha = 'ca00d2275bd0525bfccd5dd79ea2c6e2b5d810d0438d077aca5c63937ed867f8'
+        self.assertIn(v132_sha, m._VERIFIED_LEGACY_PREBUILT_PAIRS)
+        self.assertIn(v134_sha, m._VERIFIED_LEGACY_PREBUILT_PAIRS)
+        r040_v132 = '67a2bbc520378201d5bd5bcfcec07dcc917c9b86261a2692f9464479b479ff8c'
+        r040_v133 = 'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516'
+        r040_v134 = 'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211'
+        r041 = 'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7'
+        self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][0], r040_v132)
+        self.assertTrue({r040_v132, r040_v133, r040_v134, r041} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][1])
+        self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][0], r040_v134)
+        self.assertTrue({r040_v134, r041} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][1])
+
+    def test_apply_and_repair_auto_rebuild_when_installed_newer_or_no_prebuilt_variant(self):
+        game, ctx = self.fixture('0.4.1+6151ac4f')
+        cache = self.root / 'cache'
+        # 1) installed > bundled (如老用户用 update.zip 保留 0.4.0 prebuilt 但游戏升到 0.4.1)：自动切换同步配方并按 0.4.1 重编
+        with mock.patch.object(m, 'bundled_components', return_value=dict(version='0.4.0', games={'1.4.3': {'exefs': {'main': 'x'}}})), \
+             mock.patch.object(m, 'try_sync', return_value=['0.4.1']) as sync, \
+             mock.patch.object(m, 'component_release', return_value=(dict(tag_name='v0.4.1'), dict(name='a.zip'))) as rel, \
+             mock.patch.object(m, 'build') as build:
+            m.main(dict(action='apply', game=str(game), cache=str(cache), ps5=True, graphics=True))
+            sync.assert_called_once_with(cache.resolve())
+            rel.assert_called_once_with(cache.resolve(), '0.4.1')
+            build.assert_called_once()
+            self.assertEqual(build.call_args.args[1:3], (True, True))
+
+        # 2) 非 1.4.3 游戏资源尚无随包 prebuilt 成品：apply 自动切换按当前版本重编
+        with mock.patch.object(m, 'bundled_components', return_value=dict(version='0.4.1', games={'1.4.3': {'exefs': {'main': 'other'}}})), \
+             mock.patch.object(m, 'try_sync') as sync, \
+             mock.patch.object(m, 'component_release', return_value=(dict(tag_name='v0.4.1'), dict(name='a.zip'))) as rel, \
+             mock.patch.object(m, 'build') as build:
+            m.main(dict(action='apply', game=str(game), cache=str(cache), ps5=False, graphics=True))
+            sync.assert_called_once_with(cache.resolve())
+            rel.assert_called_once_with(cache.resolve(), '0.4.1')
+            self.assertEqual(build.call_args.args[1:3], (False, True))
+
+        # 3) repair 遇到手动源码构建的不同上游版本：自动保持原有组件勾选并按该版本重编
+        game_0313 = self.root / 'legacy-0313/totk.exe'
+        game_0313.parent.mkdir(parents=True)
+        game_0313.write_bytes(b'MZ\x000.3.13+ae30a61b\0stand-in-not-a-game')
+        (game_0313.parent / 'exefs').mkdir(); (game_0313.parent / 'exefs/main').write_bytes(b'local guest data')
+        (game_0313.parent / 'romfs').mkdir(); (game_0313.parent / 'romfs/romfs.bin').write_bytes(b'local image')
+        ctx_0313 = m.context(game_0313)
+        m.write_json(m.home(ctx_0313) / 'active.json', dict(mode='direct', install_method='source', version='0.3.13', ps5=True, graphics=False))
+        checker = m.APP / 'prebuilt/hostcheck.exe'; checker.parent.mkdir(parents=True, exist_ok=True); checker.write_bytes(b'hc')
+        (m.APP / 'prebuilt/manifest.json').write_text('{}', encoding='utf-8')
+        with mock.patch.object(m, 'bundled_components', return_value=dict(
+                version='0.4.1', hostcheck_sha256=m.digest(checker),
+                games={'1.4.3': {'exefs': {'main': m.digest(Path(ctx_0313['exefs']) / 'main')}, 'variants': {'v3-1': {'path': 'x'}}}})), \
+             mock.patch.object(m.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout='{"x86_64_v2":true,"x86_64_v3":true}')), \
+             mock.patch.object(m, 'try_sync') as sync, \
+             mock.patch.object(m, 'component_release', return_value=(dict(tag_name='v0.3.13'), dict(name='a.zip'))) as rel, \
+             mock.patch.object(m, 'build') as build:
+            m.main(dict(action='repair', game=str(game_0313), cache=str(cache), ps5=True, graphics=True))
+            rel.assert_called_once_with(cache.resolve(), '0.3.13')
+            self.assertEqual(build.call_args.args[1:3], (True, False))
+
+        # 4) 未知二进制版本或损坏 prebuilt 绝不静默退化到源码编译
+        game.write_bytes(b'MZ\0custom-unrecognized\0')
+        with mock.patch.object(m, 'bundled_components', return_value=dict(version='0.4.1', games={'1.4.3': {}})), \
+             mock.patch.object(m, 'build', side_effect=AssertionError('must not build unknown binary')):
+            with self.assertRaisesRegex(ValueError, '无法可靠识别'):
+                m.main(dict(action='apply', game=str(game), cache=str(cache)))
+
+    def test_rebase_edits_wide_window_and_neighbor_rewrite_fallback(self):
+        # 1) 1-3 行邻居在目标文件中重复出现，但 5 行宽窗口唯一匹配
+        base = (
+            'void alpha() {\n'
+            '    int x = 1;\n'
+            '    int y = 2;\n'
+            '    int z = 3;\n'
+            '}\n'
+            'void beta() {\n'
+            '    int target_anchor = 1;\n'
+            '    int x = 1;\n'
+            '    int y = 2;\n'
+            '    int z = 3;\n'
+            '    return;\n'
+            '}\n'
+        )
+        ours = base.replace('    int z = 3;\n    return;\n', '    int z = 3;\n    EXTENSION_HOOK();\n    return;\n')
+        upstream = (
+            '// header added\n'
+            + base.replace('void alpha() {', 'void alpha() {\n    return;')
+        )
+        # 在 upstream 中 ('int x = 1;', 'int y = 2;', 'int z = 3;') 出现 2 次，('return;', '}') 也出现 2 次；
+        # 仅当左侧窗口扩展到 4-5 行包含 'int target_anchor = 1;' 时才唯一匹配。
+        merged, count = m.rebase_edits(base, ours, upstream)
+        self.assertEqual(count, 1)
+        self.assertEqual(merged.count('EXTENSION_HOOK();'), 1)
+        self.assertIn('int target_anchor = 1;\n    int x = 1;\n    int y = 2;\n    int z = 3;\n    EXTENSION_HOOK();\n    return;', merged)
+
+        # 2) 纯插入点紧邻的 1-2 行被上游重写，但外围 5-6 行窗口在 base 和 upstream 中均唯一
+        base2 = (
+            'static const char *const known[] = {\n'
+            '    "KEY_A",\n'
+            '    "KEY_B",\n'
+            '    "KEY_C",\n'
+            '    "KEY_NEAR_LEFT",\n'
+            '    "KEY_NEAR_RIGHT",\n'
+            '    "KEY_D",\n'
+            '    "KEY_E",\n'
+            '    "KEY_F",\n'
+            '};\n'
+        )
+        ours2 = base2.replace(
+            '    "KEY_NEAR_LEFT",\n    "KEY_NEAR_RIGHT",\n',
+            '    "KEY_NEAR_LEFT",\n    "EXT_KEY_1",\n    "EXT_KEY_2",\n    "KEY_NEAR_RIGHT",\n',
+        )
+        upstream2 = base2.replace(
+            '    "KEY_NEAR_LEFT",\n    "KEY_NEAR_RIGHT",\n',
+            '    "KEY_UPSTREAM_NEW_1",\n    "KEY_UPSTREAM_NEW_2",\n',
+        )
+        merged2, count2 = m.rebase_edits(base2, ours2, upstream2)
+        self.assertEqual(count2, 1)
+        self.assertIn('"EXT_KEY_1"', merged2)
+        self.assertIn('"EXT_KEY_2"', merged2)
+        self.assertIn('"KEY_UPSTREAM_NEW_1"', merged2)
 
 
 if __name__ == '__main__':

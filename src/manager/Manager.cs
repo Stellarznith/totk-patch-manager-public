@@ -264,14 +264,19 @@ public partial class Manager : Form {
     async Task InstallComponent(bool controller) {
         await Inspect();
         string status=Value(compatibility,"status");
-        if(controller&&ps5.Checked&&(status=="newer"||status=="unknown")) {
-            string prompt=status=="newer"
-                ? "游戏程序 "+gameVersion+" 比内置成品 "+Value(compatibility,"bundled")+" 新。完整 PS5 支持可使用对应免编译包，或在「安装管理 → 高级安装」选择「重编当前版本」。"
-                : "当前游戏程序版本无法识别，暂时只能安装独立图标。";
-            prompt+="\n\n现在只安装 PS5 图标，并保留当前游戏程序？";
-            if(MessageBox.Show(this,prompt,"PS5 安装方式",MessageBoxButtons.YesNo,MessageBoxIcon.Information,MessageBoxDefaultButton.Button2)==DialogResult.Yes)
+        if(controller&&ps5.Checked&&status=="unknown") {
+            string prompt="当前游戏程序版本无法识别，暂时只能安装独立图标。\n\n现在只安装 PS5 图标，并保留当前游戏程序？";
+            if(!selftest&&MessageBox.Show(this,prompt,"PS5 安装方式",MessageBoxButtons.YesNo,MessageBoxIcon.Information,MessageBoxDefaultButton.Button2)==DialogResult.Yes)
                 await InstallIcons();
             return;
+        }
+        if(controller&&ps5.Checked&&status=="newer"&&!selftest) {
+            string prompt="游戏程序 "+gameVersion+" 比内置离线成品 "+Value(compatibility,"bundled")+" 新。\n\n"
+                +"选「是」：自动同步适配配方，并按当前版本（"+gameVersion+"）编译安装完整 PS5 组件（含图标与 USB 触觉，保留回退备份）。\n"
+                +"选「否」：仅安装独立 PS5 图标 MOD（不改程序）。";
+            var choice=MessageBox.Show(this,prompt,"PS5 安装方式",MessageBoxButtons.YesNoCancel,MessageBoxIcon.Question,MessageBoxDefaultButton.Button1);
+            if(choice==DialogResult.No){await InstallIcons();return;}
+            if(choice!=DialogResult.Yes)return;
         }
         bool hasPs5=Value(lastHealth,"ps5")=="True",hasGraphics=Value(lastHealth,"graphics")=="True";
         var extra=new Dictionary<string,object>{{"ps5",controller?ps5.Checked:hasPs5},{"graphics",controller?hasGraphics:graphics.Checked}};
