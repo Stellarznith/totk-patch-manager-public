@@ -61,7 +61,13 @@ def fetch_release(channel, cancelled):
             break
         except (OSError, ValueError, http.client.HTTPException) as error:
             if attempt or isinstance(error, urllib.error.HTTPError) and error.code not in (429, 500, 502, 503, 504):
-                raise ValueError("无法连接 GitHub 查询管理器更新：" + str(error)) from error
+                detail = str(error)
+                hint = (
+                    "（检测到 HTTPS 证书校验失败：常见原因是电脑开启了 Watt Toolkit / Steam++ 等本地反代加速器或杀软 HTTPS 扫描，请先关闭这类工具或改用常规系统代理后再试。）"
+                    if "CERTIFICATE_VERIFY_FAILED" in detail or "unable to get local issuer certificate" in detail
+                    else ""
+                )
+                raise ValueError("无法连接 GitHub 查询管理器更新：" + detail + hint) from error
     if channel == "stable":
         if not isinstance(release, dict) or release.get("prerelease"):
             raise ValueError("GitHub 未返回正式版。")

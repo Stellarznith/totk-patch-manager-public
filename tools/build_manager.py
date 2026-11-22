@@ -26,6 +26,8 @@ def main() -> None:
     parser.add_argument("--compiler", type=Path)
     parser.add_argument("--local-payload", type=Path,
                         help="Optional private, unpacked payload directory (containing manager-version.txt, assets.zip and prebuilt/)")
+    parser.add_argument("--portable-online", action="store_true",
+                        help="Mark output as a standalone portable online build (includes Python runtime and multi-version recipes without private prebuilt binaries)")
     args = parser.parse_args()
 
     compiler = args.compiler
@@ -98,7 +100,12 @@ def main() -> None:
         legacy_candidates.extend(sorted(payload.glob("recipe-*.zip")))
         if (payload / "recipe.zip").is_file():
             legacy_candidates.append(payload / "recipe.zip")
-    for extra in (ROOT / "build/app-v1.3.4-final/recipe.zip", ROOT / "build/app-1.2.9/recipe-0.3.13.zip"):
+    for extra in (
+        ROOT / "dist/release-v1.3.5-update/recipe-0.4.1.zip",
+        ROOT / "dist/release-v1.3.4-update/recipe-0.4.0.zip",
+        ROOT / "build/app-v1.3.4-final/recipe.zip",
+        ROOT / "build/app-1.2.9/recipe-0.3.13.zip",
+    ):
         if extra.is_file():
             legacy_candidates.append(extra)
     seen_bases = {current_basis}
@@ -113,6 +120,12 @@ def main() -> None:
         if c_basis and c_basis not in seen_bases:
             shutil.copyfile(candidate, output / f"recipe-{c_basis}.zip")
             seen_bases.add(c_basis)
+
+    if args.portable_online and not payload:
+        (output / "portable-online.txt").write_text("online\n", encoding="ascii")
+        for notice in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+            if (ROOT / notice).is_file():
+                shutil.copyfile(ROOT / notice, output / notice)
 
     if payload and (payload / "assets.zip").is_file():
         shutil.copyfile(payload / "assets.zip", output / "assets.zip")

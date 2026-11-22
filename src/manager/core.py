@@ -198,7 +198,17 @@ def network_routes(url):
         raise ValueError('只接受公开的官方 GitHub HTTPS 资源地址。')
     direct=('GitHub 直连',url)
     mirror=('GH-Proxy 加速',MIRROR+url)
-    return [direct] if NETWORK=='direct' else [mirror] if NETWORK=='mirror' else [mirror,direct]
+    if NETWORK=='direct':return [direct]
+    if NETWORK=='mirror':return [mirror]
+    # api.github.com 常被公共 GH-Proxy 节点返回 403 限流，自动模式先试 GitHub 直连再回退镜像
+    return [direct,mirror] if parsed.hostname=='api.github.com' else [mirror,direct]
+
+
+def _ssl_hint(detail):
+    text = str(detail)
+    if 'CERTIFICATE_VERIFY_FAILED' in text or 'unable to get local issuer certificate' in text:
+        return '（检测到 HTTPS 证书校验失败：常见原因是电脑开启了 Watt Toolkit / Steam++ 等本地反代加速器或杀软 HTTPS 扫描，请先关闭这类工具或改用常规系统代理后再试。）'
+    return ''
 
 
 def get_json(url):
@@ -219,7 +229,8 @@ def get_json(url):
             return result
         except (OSError,ValueError,http.client.HTTPException) as e:
             errors.append(route+': '+str(e));emit(route+'查询失败，尝试可用备用线路。')
-    raise RuntimeError('无法查询官方更新。'+'；'.join(errors))
+    joined = '；'.join(errors)
+    raise RuntimeError('无法查询官方更新。' + joined + _ssl_hint(joined))
 
 
 def download(url, target, expected=None, expected_size=None):
@@ -1210,6 +1221,7 @@ _VERIFIED_LEGACY_PREBUILT_PAIRS = {
             'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516',
             'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211',
             'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7',
+            '68458b8fa55715673614c55845b00176c70d5c82e7eb8c9f95aced283972ea63',
         }),
     ),
     'ca00d2275bd0525bfccd5dd79ea2c6e2b5d810d0438d077aca5c63937ed867f8': (
@@ -1217,6 +1229,7 @@ _VERIFIED_LEGACY_PREBUILT_PAIRS = {
         frozenset({
             'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211',
             'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7',
+            '68458b8fa55715673614c55845b00176c70d5c82e7eb8c9f95aced283972ea63',
         }),
     ),
 }
@@ -1236,9 +1249,11 @@ def _expected_installed_recipe_id(state):
 
 def bundled_components():
     manifest_path = APP / 'prebuilt/manifest.json'
+    if not manifest_path.is_file() and (APP / 'portable-online.txt').is_file():
+        raise ValueError('当前为便携在线版（不含离线预编译包）。')
     manifest = read_json(manifest_path, {})
     if manifest.get('schema') != 1 or not manifest.get('games'):
-        raise ValueError('预编译组件包不完整，请完整解压免编译安装包。本次不会自动下载或重编译。')
+        raise ValueError('预编译组件包不完整，请完整解压免编译安装包（若使用不含预编译包的轻量在线版，请改用「安装管理 → 重编当前版本」或「更新上游并重编」）。本次不会自动下载或重编译。')
     bundled_recipe = recipe_id()
     paired = _VERIFIED_LEGACY_PREBUILT_PAIRS.get(digest(manifest_path))
     legacy_ok = (
@@ -2083,6 +2098,7 @@ def _prebuilt_fallback_to_rebuild(message):
         ('高于管理器内置的' in message and '已阻止降级' in message)
         or '当前是手动构建的其它上游版本' in message
         or '这份游戏资源尚无随包成品' in message
+        or '当前为便携在线版（不含离线预编译包）' in message
     )
 
 

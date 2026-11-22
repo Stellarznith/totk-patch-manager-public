@@ -1,5 +1,12 @@
 # 更新记录 · Changelog
 
+## 1.3.6
+
+- **适配最新上游 TotK Recomp `0.5.0`**（commit `afae80c908ab9fc9cdbafa9ed5295c946d80aa21`）：完整融合上游 `0.5.0` 原生 FSR 3.1、原生帧生成、`vk_objmv_wanted`、`PROMPTS=playstation` 及全部 77 个文件，同时完整保留本工具独有的手动 DLSS M 模型、NVIDIA DLSS 帧生成（2x–6x）、扩展性能面板以及 Stellarznith / Stavaas / Alerion 三套 PS5 样式与 DualSense USB 高清触觉。
+- **发布开箱即用的便携集成版（`portable.zip`）+ 轻量更新补丁（`update.zip`）双版本**：便携集成版自带 Python 3.14 运行环境与 `0.3.13` / `0.4.0` / `0.4.1` / `0.5.0` 四代配方（不含私有预编译二进制或游戏资源），新用户解压双击即可直接运行，主按钮点击「安装」自动同步配方并按当前游戏版本编译安装，不再报“缺少随包运行环境”或“预编译组件包不完整”。
+- **修复联网查询 403 与 SSL 证书报错提示**：`api.github.com` 查询在自动线路下改为优先直连 GitHub、失败再回退镜像，避开公共 GH-Proxy 对 API 返回 403 的限流问题；遇到 `SSL: CERTIFICATE_VERIFY_FAILED` 时直接提示排查 Watt Toolkit / Steam++ 等本地反代加速器或杀软 HTTPS 扫描。
+- **完善旧轻量版与历史预编译兼容**：无 `portable-online.txt` 的旧版缺失预编译提示补充引导至「重编当前版本 / 更新上游并重编」；同时将 `0.5.0` 配方指纹（`68458b8f...`）纳入 `_VERIFIED_LEGACY_PREBUILT_PAIRS` 保证老预编译用户升级零破坏。
+
 ## 1.3.5
 
 - 适配最新上游 **TotK Recomp `0.4.1`**（commit `6151ac4fbc2c490207116609fbf4974b01843763`，涵盖原生 NVIDIA Reflex 联动、`DLSS_SIZES`、分类音量及 `ui/menu.cpp` 等全部 22 处上游变更融合，77 个文件零冲突通过）。

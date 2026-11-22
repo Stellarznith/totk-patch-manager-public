@@ -109,6 +109,8 @@ public partial class Manager {
                 var metadata = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(manifest));
                 if (Value(metadata, "version") != "") bundledVersion = Value(metadata, "version");
                 if (Value(metadata, "manager_version") != "") managerVersion = Value(metadata, "manager_version");
+            } else if (File.Exists(Path.Combine(app, "portable-online.txt"))) {
+                bundledVersion = "便携在线版";
             }
             string version = Path.Combine(app, "manager-version.txt");
             if (File.Exists(version)) managerVersion = File.ReadAllText(version).Trim();

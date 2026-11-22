@@ -737,7 +737,9 @@ class ManagerTests(unittest.TestCase):
 
     def test_network_routes_and_public_origin_validation(self):
         url=m.API+'/releases/latest'
-        self.assertEqual(m.network_routes(url)[0][1],'https://gh-proxy.com/'+url)
+        dl='https://github.com/valentderah/totk-pc-recomp/releases/download/v0.5.0/a.zip'
+        self.assertEqual([u for _,u in m.network_routes(url)],[url,'https://gh-proxy.com/'+url])
+        self.assertEqual(m.network_routes(dl)[0][1],'https://gh-proxy.com/'+dl)
         m.NETWORK='direct';self.assertEqual(m.network_routes(url),[('GitHub 直连',url)])
         for url in ['http://github.com/a','https://example.com/a','https://user:secret@github.com/a','https://gh-proxy.com/#https://github.com/a']:
             with self.assertRaises(ValueError):m.network_routes(url)
@@ -884,10 +886,38 @@ class ManagerTests(unittest.TestCase):
         r040_v133 = 'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516'
         r040_v134 = 'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211'
         r041 = 'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7'
+        r050 = '68458b8fa55715673614c55845b00176c70d5c82e7eb8c9f95aced283972ea63'
         self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][0], r040_v132)
-        self.assertTrue({r040_v132, r040_v133, r040_v134, r041} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][1])
+        self.assertTrue({r040_v132, r040_v133, r040_v134, r041, r050} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][1])
         self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][0], r040_v134)
-        self.assertTrue({r040_v134, r041} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][1])
+        self.assertTrue({r040_v134, r041, r050} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][1])
+
+    def test_api_route_prefers_direct_and_ssl_error_adds_hint(self):
+        m.NETWORK = 'auto'
+        api_routes = [r for r, _ in m.network_routes('https://api.github.com/repos/valentderah/totk-pc-recomp/releases/latest')]
+        dl_routes = [r for r, _ in m.network_routes('https://github.com/valentderah/totk-pc-recomp/releases/download/v0.5.0/a.zip')]
+        self.assertEqual(api_routes, ['GitHub 直连', 'GH-Proxy 加速'])
+        self.assertEqual(dl_routes, ['GH-Proxy 加速', 'GitHub 直连'])
+        with mock.patch.object(m.urllib.request, 'urlopen', side_effect=OSError('[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate')):
+            with self.assertRaisesRegex(RuntimeError, 'Watt Toolkit'):
+                m.get_json('https://api.github.com/repos/valentderah/totk-pc-recomp/releases/latest')
+
+    def test_portable_online_marker_auto_rebuilds_without_breaking_missing_prebuilt_guard(self):
+        game, ctx = self.fixture('0.5.0+afae80c9')
+        cache = self.root / 'cache'
+        # 无 portable-online.txt 且缺少 prebuilt 时，仍严格拒绝（防止完整包解压不全静默重编）
+        with mock.patch.object(m, 'build', side_effect=AssertionError('must not build without portable marker')):
+            with self.assertRaisesRegex(ValueError, '预编译组件包不完整'):
+                m.main(dict(action='apply', game=str(game), cache=str(cache)))
+        # 存在 portable-online.txt 的便携在线版，点击 apply 自动同步配方并按当前版本重编
+        (m.APP / 'portable-online.txt').write_text('online\n', encoding='ascii')
+        with mock.patch.object(m, 'try_sync', return_value=['0.5.0']) as sync, \
+             mock.patch.object(m, 'component_release', return_value=(dict(tag_name='v0.5.0'), dict(name='a.zip'))) as rel, \
+             mock.patch.object(m, 'build') as build:
+            m.main(dict(action='apply', game=str(game), cache=str(cache), ps5=True, graphics=True))
+            sync.assert_called_once_with(cache.resolve())
+            rel.assert_called_once_with(cache.resolve(), '0.5.0')
+            build.assert_called_once()
 
     def test_apply_and_repair_auto_rebuild_when_installed_newer_or_no_prebuilt_variant(self):
         game, ctx = self.fixture('0.4.1+6151ac4f')
