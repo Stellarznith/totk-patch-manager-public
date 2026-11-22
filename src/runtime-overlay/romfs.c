@@ -1119,7 +1119,7 @@ static void overlay_init(void) {
     char ps5[2100], ps5_dir[128];
     int ps5_want = romfs_ps5_style_pick(cfg_get("TOTK_PS5_PROMPT_STYLE"));
     const char *ps5_folder = romfs_ps5_style_folder(ps5_want);
-    int ps5_len = wide ? (shaped_name(index_dir, ps5_folder, out[0], out[1], ps5_dir, sizeof ps5_dir)
+    int ps5_len = wide ? (shaped_name(index_dir, ps5_folder, out[0], out[1], "", ps5_dir, sizeof ps5_dir)
                               ? snprintf(ps5, sizeof ps5, "%s/%s/manifest.tsv", index_dir, ps5_dir)
                               : -1)
                        : snprintf(ps5, sizeof ps5, "%s/%s/manifest.tsv", index_dir, ps5_folder);

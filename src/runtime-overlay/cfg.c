@@ -451,6 +451,10 @@ static const char *prompts_setting(void) {
         if (!strcasecmp(p, "ps5")) return TOTK_PATCH_PS5 ? "ps5" : "nintendo";
         return p;
     }
+    // The old switch only supplies a choice when no prompt style has been selected.
+    const char *legacy = raw_get("TOTK_PS5_PROMPTS");
+    return TOTK_PATCH_PS5 && legacy && !strcmp(legacy, "1") ? "ps5" : p;
+}
 
 // Whether the prompts in effect have their folder at screen_res: the folder input_map.c input_prompts_pick and
 // input_prompts_folder pick at start. The game's own prompts need none.

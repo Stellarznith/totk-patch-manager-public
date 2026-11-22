@@ -886,7 +886,7 @@ class ManagerTests(unittest.TestCase):
         r040_v133 = 'f49168e38592ebbfd1a380c4de1ae17ac2180a1c00ed6e03032129a3db764516'
         r040_v134 = 'a897fe5074099b526505467d7783b540e274fd4a70982de303d1fb30e1246211'
         r041 = 'de01cdd23e3c8e6f484e524e6a003fd6fad3d16d529644557d76311367a492f7'
-        r050 = '68458b8fa55715673614c55845b00176c70d5c82e7eb8c9f95aced283972ea63'
+        r050 = '57e5abc1c0021dab4b5f06df8c17f59e7c2c1294f4d08d0d230612aaab158be9'
         self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][0], r040_v132)
         self.assertTrue({r040_v132, r040_v133, r040_v134, r041, r050} <= m._VERIFIED_LEGACY_PREBUILT_PAIRS[v132_sha][1])
         self.assertEqual(m._VERIFIED_LEGACY_PREBUILT_PAIRS[v134_sha][0], r040_v134)

@@ -7,7 +7,7 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RECIPE_ID = "68458b8fa55715673614c55845b00176c70d5c82e7eb8c9f95aced283972ea63"
+RECIPE_ID = "57e5abc1c0021dab4b5f06df8c17f59e7c2c1294f4d08d0d230612aaab158be9"
 
 
 def make_recipe(upstream: Path, output: Path) -> str:

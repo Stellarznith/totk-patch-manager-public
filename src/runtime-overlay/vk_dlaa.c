@@ -1421,7 +1421,6 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         if (!fsr_evaluate(ex, e, t, z, ow, oh, jx, jy, timed)) return;
         goto engine_done;
     }
-    NgxParam *p = D.params;
     if (!e->feat) {
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);
