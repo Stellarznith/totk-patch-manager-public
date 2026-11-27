@@ -1026,6 +1026,126 @@ class ManagerTests(unittest.TestCase):
         self.assertIn('"EXT_KEY_2"', merged2)
         self.assertIn('"KEY_UPSTREAM_NEW_1"', merged2)
 
+    def test_long_path_extract_strip_top_and_toolkit_reuse(self):
+        # 构造超过 70 字符深的缓存根目录 + FidelityFX 最深 146 字符相对路径（若未 strip_top + short_build_cache 会超过 280 字符）
+        deep_cache = self.root / ('totk-patch-manager-v1.3.7-windows-x64-full-local-' + 'x' * 25) / 'cache'
+        tag_dir = deep_cache / 'v0.5.0'
+        short_base = self.root / 'sc'
+        tk_dir = short_base / 'v0.5.0' / 'tk' / 'TotK-Setup-0.5.0-windows'
+        (tk_dir / 'llvm/bin').mkdir(parents=True)
+        (tk_dir / 'llvm/bin/clang.exe').write_bytes(b'clang')
+        (tk_dir / 'VERSION').write_text('0.5.0+afae80c9\n', encoding='utf-8')
+        m.write_json(short_base / 'v0.5.0' / 'tk' / 'verified.json', dict(digest='sha256:tk'))
+
+        commit = 'a' * 40
+        top = f'totk-pc-recomp-{commit}'
+        deep_rel = 'runtime/third_party/FidelityFX/sdk/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid.h'
+        tag_dir.mkdir(parents=True, exist_ok=True)
+        archive = tag_dir / 'source.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr(f'{top}/VERSION', '0.5.0\n')
+            z.writestr(f'{top}/recomp/gen.py', '')
+            z.writestr(f'{top}/tools/build_game.py', '')
+            z.writestr(f'{top}/{deep_rel}', '// deep header\n')
+
+        self.assertEqual(m.archive_top_commit(archive), commit)
+        with mock.patch.object(m, 'short_build_cache', return_value=short_base), \
+             mock.patch.object(m, 'download', side_effect=AssertionError('must reuse verified toolkit & source.zip')), \
+             mock.patch.object(m, 'get_json', side_effect=AssertionError('must not hit GitHub commit API')):
+            kit, source = m.toolkit(deep_cache, dict(tag_name='v0.5.0'), dict(name='tk.zip', digest='sha256:tk', browser_download_url='https://github.com/a/b'))
+            self.assertEqual(kit, tk_dir)
+            self.assertTrue((source / deep_rel).is_file())
+            self.assertEqual(m.read_json(source.parent / 'verified.json', {}).get('commit'), commit)
+            # 第二次直接复用
+            kit2, source2 = m.toolkit(deep_cache, dict(tag_name='v0.5.0'), dict(name='tk.zip', digest='sha256:tk', browser_download_url='https://github.com/a/b'))
+            self.assertEqual(source2, source)
+
+        # win_long_path 保留外部构建短路径约定（<240 不加 \\?\；>=240 加 \\?\）
+        if os.name == 'nt':
+            self.assertFalse(m.win_long_path(self.root / 'a.txt').startswith('\\\\?\\'))
+            self.assertTrue(m.win_long_path(deep_cache / deep_rel).startswith('\\\\?\\'))
+
+    def test_short_build_cache_switches_only_when_too_long(self):
+        short_dir = self.root / 'c'
+        if len(str(short_dir.resolve())) <= m.MAX_SAFE_CACHE_LEN:
+            self.assertEqual(m.short_build_cache(short_dir), short_dir.resolve())
+        long_dir = self.root / ('l' * (m.MAX_SAFE_CACHE_LEN + 20))
+        cand_short = self.root / 's'
+        emitted = []
+        with mock.patch.object(m, 'emit', side_effect=lambda msg, **kw: emitted.append(msg)), \
+             mock.patch.object(m.Path, 'drive', new_callable=mock.PropertyMock, return_value='Z:'):
+            with mock.patch.dict(os.environ, {'LOCALAPPDATA': str(self.root / 'la')}, clear=False):
+                # 用 tempfile.gettempdir 指到短目录模拟同盘不可写、fallback 到可写短目录
+                with mock.patch.object(m.tempfile, 'gettempdir', return_value=str(cand_short)):
+                    with mock.patch.object(m, '_probe_writable_dir', side_effect=[None, None, cand_short.resolve()]):
+                        if len(str(cand_short / 'TotKPM')) <= m.MAX_SAFE_CACHE_LEN:
+                            chosen = m.short_build_cache(long_dir)
+                            self.assertEqual(chosen, cand_short.resolve())
+                            self.assertTrue(any('短工作路径' in msg for msg in emitted))
+
+    def test_update_action_prefers_matching_bundled_prebuilt_and_falls_back(self):
+        game, ctx = self.fixture('0.4.1+6151ac4f')
+        cache = self.root / 'cache'
+        manifest = m.APP / 'prebuilt/manifest.json'
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text('{}', encoding='utf-8')
+        info_050 = dict(tag_name='v0.5.0')
+        asset_050 = dict(name='tk.zip')
+
+        # 1) 最新版与随包一致时，直接调用 install_prebuilt，不再重编
+        with mock.patch.object(m, 'try_sync') as sync, \
+             mock.patch.object(m, 'component_release', return_value=(info_050, asset_050)), \
+             mock.patch.object(m, 'bundled_components', return_value=dict(version='0.5.0', games={'1.4.3': {}})), \
+             mock.patch.object(m, 'install_prebuilt', return_value=dict(ok=True)) as ipb, \
+             mock.patch.object(m, 'build', side_effect=AssertionError('must not build when prebuilt succeeds')):
+            m.main(dict(action='update', game=str(game), cache=str(cache), ps5=True, graphics=False))
+            sync.assert_called_once()
+            ipb.assert_called_once_with(mock.ANY, True, False, cache.resolve(), repair=False)
+
+        # 2) 非 1.4.3 等尚无随包成品时，无缝回退源码 build
+        with mock.patch.object(m, 'try_sync'), \
+             mock.patch.object(m, 'component_release', return_value=(info_050, asset_050)), \
+             mock.patch.object(m, 'bundled_components', return_value=dict(version='0.5.0', games={'1.4.3': {}})), \
+             mock.patch.object(m, 'install_prebuilt', side_effect=ValueError('这份游戏资源尚无随包成品')), \
+             mock.patch.object(m, 'build') as build:
+            m.main(dict(action='update', game=str(game), cache=str(cache), ps5=False, graphics=True))
+            build.assert_called_once()
+            self.assertEqual(build.call_args.args[1:3], (False, True))
+
+        # 3) 硬错误（如游戏运行中）直接抛出，不回退重编
+        with mock.patch.object(m, 'try_sync'), \
+             mock.patch.object(m, 'component_release', return_value=(info_050, asset_050)), \
+             mock.patch.object(m, 'bundled_components', return_value=dict(version='0.5.0', games={'1.4.3': {}})), \
+             mock.patch.object(m, 'install_prebuilt', side_effect=ValueError('游戏正在运行，请先关闭后重试。')), \
+             mock.patch.object(m, 'build', side_effect=AssertionError('must not build on hard error')):
+            with self.assertRaisesRegex(ValueError, '游戏正在运行'):
+                m.main(dict(action='update', game=str(game), cache=str(cache), ps5=True, graphics=True))
+
+    def test_portable_online_without_assets_zip_degrades_cleanly_and_blocks_broken_full_pack(self):
+        game, ctx = self.fixture('0.5.0+afae80c9')
+        (m.APP / 'portable-online.txt').write_text('online\n', encoding='ascii')
+        self.assertEqual(m.assets_id(), 'no-assets')
+
+        # 源码编译路径 allow_ps5_degrade=True 时跳过私有贴图并正常返回 0
+        emitted = []
+        with mock.patch.object(m, 'emit', side_effect=lambda msg, **kw: emitted.append(msg)):
+            res = m.assets(ctx, self.root / 'out', True, True, allow_ps5_degrade=True)
+        self.assertEqual(res, 0)
+        self.assertTrue(any('assets.zip' in msg for msg in emitted))
+
+        # 独立图标安装缺少 assets.zip 时给出清晰中文提示而非 FileNotFoundError
+        with self.assertRaisesRegex(ValueError, '未随包附带私有图标资源包'):
+            m.install_icons(ctx, 'white')
+
+        # 完整包有 prebuilt/manifest.json（带 64 位 assets_id）却缺 assets.zip 时，bundled_components() 仍必须拒绝
+        (m.APP / 'portable-online.txt').unlink()
+        manifest_path = m.APP / 'prebuilt/manifest.json'
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        rid = m.recipe_id()
+        m.write_json(manifest_path, dict(schema=1, version='0.5.0', recipe_id=rid, assets_id='a' * 64, games={'1.4.3': {}}))
+        with self.assertRaisesRegex(ValueError, '随包资源与成品版本不匹配'):
+            m.bundled_components()
+
 
 if __name__ == '__main__':
     result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ManagerTests))

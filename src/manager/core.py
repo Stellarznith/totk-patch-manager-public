@@ -11,9 +11,11 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -101,7 +103,14 @@ def usable_archive(path):
 
 def source_tree(root):
     """Locate the extracted upstream checkout; a partial extraction must not count as a cache hit."""
-    for p in Path(root).rglob('VERSION'):
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return None
+    # 优先检查自身与直接子目录，避免深层超长路径目录拖慢或干扰查找
+    for candidate in [root_path] + [p for p in root_path.iterdir() if p.is_dir()]:
+        if (candidate / 'VERSION').is_file() and (candidate / 'recomp/gen.py').is_file() and (candidate / 'tools/build_game.py').is_file():
+            return candidate
+    for p in root_path.rglob('VERSION'):
         if (p.parent / 'recomp/gen.py').is_file() and (p.parent / 'tools/build_game.py').is_file():
             return p.parent
     return None
@@ -175,20 +184,124 @@ def inside(root, relative):
     return result
 
 
-def extract(archive, target):
+MAX_SAFE_CACHE_LEN = 90
+
+
+def win_long_path(path):
+    """为 Windows Python 内部文件读写转换超长路径（严禁传给 clang/ninja 等外部构建工具）。"""
+    text = os.fspath(path)
+    if os.name != 'nt':
+        return text
+    if text.startswith('\\\\?\\'):
+        return text
+    abspath = os.path.abspath(text)
+    if len(abspath) < 240:
+        return abspath
+    if abspath.startswith('\\\\'):
+        return '\\\\?\\UNC\\' + abspath[2:]
+    return '\\\\?\\' + abspath
+
+
+def rmtree_long(path):
+    """安全删除可能包含 Windows 超长路径或只读文件的目录。"""
+    target = Path(path)
+    if not os.path.exists(win_long_path(target)):
+        return
+
+    def _onexc(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(win_long_path(target), onexc=_onexc)
+
+
+def archive_top_commit(archive):
+    """从 GitHub source.zip 顶层目录提取 40 位 commit 哈希，避免再调用限流 API。"""
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for item in z.infolist():
+                top = item.filename.strip('/').split('/')[0]
+                m_sha = re.fullmatch(r'totk-pc-recomp-([0-9a-f]{40})', top)
+                if m_sha:
+                    return m_sha[1]
+    except (OSError, zipfile.BadZipFile):
+        pass
+    return ''
+
+
+def _probe_writable_dir(directory):
+    try:
+        p = Path(directory)
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / ('.write-probe-' + str(os.getpid()) + '-' + str(time.time_ns()))
+        probe.write_bytes(b'ok')
+        probe.unlink(missing_ok=True)
+        return p.resolve()
+    except OSError:
+        return None
+
+
+def short_build_cache(cache):
+    """当管理器所在缓存路径过长（>90字符）时自动切换短工作目录，避免源码解压与编译触及 Windows MAX_PATH。"""
+    resolved = Path(cache).resolve()
+    if os.name != 'nt' or len(str(resolved)) <= MAX_SAFE_CACHE_LEN:
+        return resolved
+    candidates = []
+    if resolved.drive:
+        candidates.append(Path(resolved.drive + '\\') / '.totk-pm-cache')
+    local_app = os.environ.get('LOCALAPPDATA')
+    if local_app:
+        cand = Path(local_app) / 'TotKPM'
+        if len(str(cand)) <= MAX_SAFE_CACHE_LEN:
+            candidates.append(cand)
+    temp_dir = tempfile.gettempdir()
+    if temp_dir:
+        cand = Path(temp_dir) / 'TotKPM'
+        if len(str(cand)) <= MAX_SAFE_CACHE_LEN:
+            candidates.append(cand)
+    for cand in candidates:
+        ok = _probe_writable_dir(cand)
+        if ok is not None and len(str(ok)) <= MAX_SAFE_CACHE_LEN:
+            emit(f'检测到当前缓存路径较长（{len(str(resolved))} 字符），已自动改用短工作路径以规避 Windows 路径长度限制：{ok}')
+            return ok
+    return resolved
+
+
+def extract(archive, target, strip_top=False):
     with zipfile.ZipFile(archive) as z:
-        if sum(x.file_size for x in z.infolist()) > 4 * 1024**3:
+        infos = z.infolist()
+        if sum(x.file_size for x in infos) > 4 * 1024**3:
             raise ValueError('下载包解压大小异常。')
-        for item in z.infolist():
+        top_prefix = ''
+        if strip_top:
+            non_empty = [x.filename.lstrip('/') for x in infos if x.filename.strip('/')]
+            tops = {name.split('/', 1)[0] for name in non_empty}
+            if len(tops) == 1:
+                only = next(iter(tops))
+                if any('/' in name for name in non_empty):
+                    top_prefix = only + '/'
+        for item in infos:
             cancelled()
-            p = inside(target, item.filename)
+            rel = item.filename.lstrip('/')
+            if top_prefix:
+                if rel == top_prefix or rel == top_prefix.rstrip('/'):
+                    continue
+                if rel.startswith(top_prefix):
+                    rel = rel[len(top_prefix):]
+            if not rel:
+                continue
+            p = inside(target, rel)
             if (item.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError('下载包包含符号链接。')
+            lp = win_long_path(p)
             if item.is_dir():
-                p.mkdir(parents=True, exist_ok=True)
+                os.makedirs(lp, exist_ok=True)
             else:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(item) as src, p.open('wb') as dst:
+                os.makedirs(win_long_path(p.parent), exist_ok=True)
+                with z.open(item) as src, open(lp, 'wb') as dst:
                     shutil.copyfileobj(src, dst)
 
 
@@ -582,7 +695,9 @@ def _known_release_commit(tag):
 
 def toolkit(cache, info, asset):
     tag = info['tag_name']
-    target = cache / tag / 'toolkit'
+    build_cache = short_build_cache(cache)
+    legacy_target = cache / tag / 'toolkit'
+    target = legacy_target if (read_json(legacy_target / 'verified.json', {}).get('digest') == asset['digest'] and len(str(legacy_target)) <= 140) else (build_cache / tag / 'tk')
     marker = target / 'verified.json'
     if read_json(marker, {}).get('digest') != asset['digest']:
         archive = download(asset['browser_download_url'], cache / asset['name'], asset['digest'][7:])
@@ -593,13 +708,27 @@ def toolkit(cache, info, asset):
     # The source is selected from the actual official binary release identity, not a moving branch.
     commit = version.split('+', 1)[1] if '+' in version else tag
     known_commit = _known_release_commit(tag) if '+' not in version else ''
-    source_dest = cache / tag / 'source'
     archive = cache / tag / 'source.zip'
+    source_dest = build_cache / tag / 's'
     source = source_tree(source_dest)
     saved = read_json(source_dest / 'verified.json', {})
-    # GitHub names the extracted folder after the full commit, so an intact tree identifies itself.
+    # 兼容复用老缓存目录中的安全长度源码树，避免老用户重复解压
+    legacy_dest = cache / tag / 'source'
+    if source is None:
+        legacy_source = source_tree(legacy_dest)
+        legacy_saved = read_json(legacy_dest / 'verified.json', {})
+        if legacy_source and len(str(legacy_source)) <= 105:
+            named_old = re.search(r'totk-pc-recomp-([0-9a-f]{40})', legacy_source.name)
+            inferred_old = named_old[1] if named_old else known_commit
+            if inferred_old and legacy_saved.get('commit') != inferred_old:
+                write_json(legacy_dest / 'verified.json', dict(commit=inferred_old, sha256=digest(archive) if usable_archive(archive) else ''))
+                legacy_saved = read_json(legacy_dest / 'verified.json', {})
+            if re.fullmatch(r'[0-9a-f]{40}', str(legacy_saved.get('commit', ''))):
+                emit('复用已验证的上游源码。')
+                return kit, legacy_source
     named = re.search(r'totk-pc-recomp-([0-9a-f]{40})', source.name) if source else None
-    inferred = named[1] if named else known_commit
+    zip_commit = archive_top_commit(archive) if usable_archive(archive) else ''
+    inferred = (named[1] if named else '') or zip_commit or known_commit
     if source and inferred and saved.get('commit') != inferred:
         write_json(source_dest / 'verified.json', dict(commit=inferred, sha256=digest(archive) if usable_archive(archive) else ''))
         saved = read_json(source_dest / 'verified.json', {})
@@ -609,12 +738,15 @@ def toolkit(cache, info, asset):
     # The archive endpoint accepts the short commit from VERSION, so a rate-limited API is not on the critical path.
     if not (archive.is_file() and usable_archive(archive)):
         download('https://github.com/valentderah/totk-pc-recomp/archive/' + commit + '.zip', archive)
-    extract(archive, source_dest)
+    zip_commit = archive_top_commit(archive)
+    extract_root = source_dest / 't'
+    rmtree_long(extract_root)
+    extract(archive, extract_root, strip_top=True)
     source = source_tree(source_dest)
     if source is None:
         raise ValueError('上游源码解压不完整，请重试。')
     named = re.search(r'totk-pc-recomp-([0-9a-f]{40})', source.name)
-    resolved = named[1] if named else (known_commit or get_json(API + '/commits/' + commit)['sha'])
+    resolved = (named[1] if named else '') or zip_commit or known_commit or get_json(API + '/commits/' + commit)['sha']
     write_json(source_dest / 'verified.json', dict(commit=resolved, sha256=digest(archive)))
     return kit, source
 
@@ -1111,14 +1243,30 @@ def recipe_apply(source, destination, merged, entry, rebased, ps5, graphics):
         name=original.relative_to(source/'runtime').as_posix()
         if name in metadata['files']:continue
         output=inside(destination,name)
-        if not output.exists() or output.read_bytes()!=original.read_bytes():
-            output.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,output)
+        lp_out = win_long_path(output)
+        lp_orig = win_long_path(original)
+        with open(lp_orig, 'rb') as f_orig:
+            orig_bytes = f_orig.read()
+        cur_bytes = None
+        if os.path.isfile(lp_out):
+            with open(lp_out, 'rb') as f_cur:
+                cur_bytes = f_cur.read()
+        if cur_bytes != orig_bytes:
+            os.makedirs(win_long_path(output.parent), exist_ok=True)
+            shutil.copyfile(lp_orig, lp_out)
     for name in sorted(merged):
         cancelled()
         output = inside(destination, name)
-        output.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(win_long_path(output.parent), exist_ok=True)
         encoded=merged[name].encode('utf-8')
-        if not output.is_file() or output.read_bytes()!=encoded:output.write_bytes(encoded)
+        lp_out = win_long_path(output)
+        cur_bytes = None
+        if os.path.isfile(lp_out):
+            with open(lp_out, 'rb') as f_cur:
+                cur_bytes = f_cur.read()
+        if cur_bytes != encoded:
+            with open(lp_out, 'wb') as f_out:
+                f_out.write(encoded)
     p = destination / 'cfg.h'
     text = p.read_text(encoding='utf-8')
     text = text.replace('#define TOTK_PATCH_FEATURES 3', '#define TOTK_PATCH_FEATURES ' + str(int(ps5) + 2 * int(graphics)))
@@ -1148,9 +1296,14 @@ def recipe_id(version=None):
 
 
 def assets_id():
+    # 便携在线版没有随包附带 assets.zip，返回固定哨兵，避免误报 FileNotFoundError；
+    # 完整包 manifest.json 带有 64 位 assets_id，仍会校验不通过防止残缺完整包误用。
+    assets_zip = APP / 'assets.zip'
+    if not assets_zip.is_file():
+        return 'no-assets'
     # ZIP timestamps change on repackaging; only payload changes invalidate a component cache.
     h=hashlib.sha256()
-    with zipfile.ZipFile(APP/'assets.zip') as z:
+    with zipfile.ZipFile(assets_zip) as z:
         for name in sorted(z.namelist()):
             h.update(name.encode());h.update(z.read(name))
     return h.hexdigest()
@@ -1459,6 +1612,12 @@ def ps5_assets_ready(ctx, rows=None):
 def assets(ctx, output, ps5, graphics, style=None, *, version=None, allow_ps5_degrade=False):
     """Unpack the packaged resources. style None writes all three icon folders side by side, which is what the
     game's F1 switch reads; a named style writes one folder only, for the standalone icon mod."""
+    assets_zip = APP / 'assets.zip'
+    if not assets_zip.is_file():
+        if allow_ps5_degrade and style is None:
+            emit('当前便携在线版未随包附带 assets.zip（内置 PS5 图标贴图与 FSR 扩展运行库），已跳过这两项私有资源，继续完成核心程序安装（PS5 USB 高清触觉、DLSS/帧生成代码及上游内置功能均可正常使用）。')
+            return 0
+        raise ValueError('当前便携在线版未随包附带私有图标资源包（assets.zip）。如需安装内置 PS5 按键图标，请使用完整免编译包，或将完整包中的 assets.zip 复制到当前管理器目录。')
     rows = {}
     if ps5:
         try:
@@ -1809,9 +1968,15 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
     source_id = read_json(source.parent / 'verified.json')['commit']
     identity = hashlib.sha256((digest(Path(ctx['exefs']) / 'main') + source_id).encode()).hexdigest()
     key = identity[:16]
-    builds = cache / 'builds'
+    build_cache = short_build_cache(cache)
+    builds = build_cache / 'b'
+    legacy_builds = cache / 'builds'
     previous_work = next((p for p in builds.iterdir() if p.is_dir() and read_json(p/'identity.json',{}).get('identity')==identity), None) if builds.is_dir() else None
-    work = previous_work or builds / key
+    if previous_work is None and legacy_builds.is_dir():
+        cand = next((p for p in legacy_builds.iterdir() if p.is_dir() and read_json(p/'identity.json',{}).get('identity')==identity), None)
+        if cand is not None and len(str(cand)) <= 105:
+            previous_work = cand
+    work = previous_work or builds / key[:10]
     work.mkdir(parents=True, exist_ok=True)
     write_json(work/'identity.json',dict(identity=identity,source_commit=source_id))
     hostcheck=work/'hostcheck.exe'
@@ -1828,7 +1993,8 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
         emit('复用已完成并通过校验的组件包，跳过编译、界面资源和着色器准备。')
         package['cleanup']=cleanup
         return install_prepared(ctx,package,official_hash)
-    runtime = work / 'runtime'
+    legacy_rt = work / 'runtime'
+    runtime = legacy_rt if (legacy_rt.is_dir() and len(str(legacy_rt)) <= 112) else (work / 'r')
     if official:
         runtime.mkdir(exist_ok=True)
         # This is our disposable compiler workspace, never a player's source/game folder.
@@ -1836,8 +2002,17 @@ def _build(ctx, ps5, graphics, info, asset, cache, official=False, cleanup=False
             if p.is_file() and not (source/'runtime'/p.relative_to(runtime)).is_file():p.unlink()
         for p in (source/'runtime').rglob('*'):
             if p.is_file():
-                target=runtime/p.relative_to(source/'runtime');target.parent.mkdir(parents=True,exist_ok=True)
-                if not target.exists() or target.read_bytes()!=p.read_bytes():shutil.copyfile(p,target)
+                target=runtime/p.relative_to(source/'runtime')
+                lp_t, lp_s = win_long_path(target), win_long_path(p)
+                with open(lp_s, 'rb') as fs:
+                    s_bytes = fs.read()
+                t_bytes = None
+                if os.path.isfile(lp_t):
+                    with open(lp_t, 'rb') as ft:
+                        t_bytes = ft.read()
+                if t_bytes != s_bytes:
+                    os.makedirs(win_long_path(target.parent), exist_ok=True)
+                    shutil.copyfile(lp_s, lp_t)
         emit('使用未修改的官方运行时源码恢复，不接入本地 PS5 或图形扩展。')
     else:recipe_apply(source, runtime, prepared, entry, [], ps5, graphics)
     main_sha = digest(Path(ctx['exefs']) / 'main')
@@ -2098,6 +2273,7 @@ def _prebuilt_fallback_to_rebuild(message):
         ('高于管理器内置的' in message and '已阻止降级' in message)
         or '当前是手动构建的其它上游版本' in message
         or '这份游戏资源尚无随包成品' in message
+        or '包中缺少所选组件组合' in message
         or '当前为便携在线版（不含离线预编译包）' in message
     )
 
@@ -2219,6 +2395,7 @@ def dispatch(request):
             info, asset = component_release(cache, tag)
             build(ctx, want_ps5, want_graphics, info, asset, cache)
     elif action in ['update','rebuild-current','refresh-recipes']:
+        want_ps5, want_graphics = request.get('ps5', True), request.get('graphics', True)
         if action != 'refresh-recipes':
             # Adapters are refreshed before the build so a newly published one is used instead of rebasing an old one.
             # Offline players fall through to whatever adapters are already on disk.
@@ -2227,7 +2404,22 @@ def dispatch(request):
         if not re.fullmatch(r'\d+\.\d+\.\d+', tag or '') and tag is not None:
             raise ValueError('当前程序版本无法可靠识别，请选择手动更新到官方最新正式版。')
         info, asset = component_release(cache,tag)
-        build(ctx, request.get('ps5', True), request.get('graphics', True), info, asset, cache)
+        if action == 'update' and (APP / 'prebuilt/manifest.json').is_file():
+            target_tag = info['tag_name'].removeprefix('v')
+            bundled = None
+            try:
+                bundled = bundled_components()
+            except ValueError:
+                bundled = None
+            if bundled and bundled.get('version') == target_tag:
+                emit(f'官方最新正式版（{target_tag}）与随包免编译成品一致，直接使用随包成品快速升级安装，无需重新下载源码编译。')
+                try:
+                    return install_prebuilt(ctx, want_ps5, want_graphics, cache, repair=False)
+                except ValueError as err:
+                    if not _prebuilt_fallback_to_rebuild(str(err)):
+                        raise
+                    emit(f'随包免编译成品不适用当前游戏（{err}），已改用源码按 {target_tag} 编译安装。')
+        build(ctx, want_ps5, want_graphics, info, asset, cache)
     elif action=='prewarm-shaders':
         ensure_idle(ctx)
         tag=active(ctx).get('version') or ctx['version'].split('+')[0]
